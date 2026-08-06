@@ -39,7 +39,6 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'django_filters',
     'drf_spectacular',
-    'channels',
 ]
 
 ANALYTICS_ENABLED = config('ANALYTICS_ENABLED', default=False, cast=bool)
@@ -67,7 +66,6 @@ LOCAL_APPS = [
     'apps.requirement_analysis',
     'apps.api_testing',
     'apps.ui_automation.apps.UiAutomationConfig',
-    'apps.app_automation.apps.AppAutomationConfig',  # APP自动化测试
     'apps.core',
     'apps.data_factory',
 ]
@@ -301,23 +299,13 @@ SPECTACULAR_SETTINGS = {
     'SERVE_INCLUDE_SCHEMA': False,
 }
 
-# Redis URL (used across celery, channels, and SMS verification)
+# Redis URL (used across Celery and SMS verification)
 REDIS_URL = config('REDIS_URL', default='redis://:1234@127.0.0.1:6379/0')
 
 # Celery Configuration
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-
-# Channels Configuration
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            'hosts': [REDIS_URL],
-        },
-    },
-}
 
 # SMS Configuration (阿里云短信)
 SMS_ACCESS_KEY_ID = config('SMS_ACCESS_KEY_ID', default='')

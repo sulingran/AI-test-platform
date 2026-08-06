@@ -112,15 +112,6 @@
           <p>{{ $t('home.dataFactoryDesc') }}</p>
         </div>
 
-        <!-- APP自动化测试 -->
-        <div class="nav-card" @click="handleNavigate('app')" role="button" tabindex="0">
-          <div class="card-icon app-icon">
-            <el-icon><Cellphone /></el-icon>
-          </div>
-          <h3>{{ $t('home.appAutomation') }}</h3>
-          <p>{{ $t('home.appAutomationDesc') }}</p>
-        </div>
-
         <!-- AI 智能模式 -->
         <div class="nav-card" @click="handleNavigate('ai-intelligent')" role="button" tabindex="0">
           <div class="card-icon ai-intelligent-icon">
@@ -180,7 +171,7 @@ import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
 import { track } from '@/utils/tracker'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MagicStick, Link, Monitor, DataLine, Cpu, Setting, ChatDotRound, UserFilled, ArrowDown, Cellphone, Tickets } from '@element-plus/icons-vue'
+import { MagicStick, Link, Monitor, DataLine, Cpu, Setting, ChatDotRound, UserFilled, ArrowDown, Tickets } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -268,7 +259,6 @@ const handleNavigate = (type) => {
     'api': '/api-testing/dashboard',
     'ui': '/ui-automation/dashboard',
     'defects': '/defects/dashboard',
-    'app': '/app-automation/dashboard',
     'ai-intelligent': '/ai-intelligent-mode/testing',
     'assistant': '/ai-generation/assistant',
     'config': '/configuration/ai-model',
@@ -516,11 +506,6 @@ const handleNavigate = (type) => {
   &.defects-icon {
     background: #fef0f0;
     color: #f56c6c;
-  }
-
-  &.app-icon {
-    background: #f9f0ff;
-    color: #722ed1;
   }
 
   &.ai-intelligent-icon {

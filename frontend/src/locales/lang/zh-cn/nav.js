@@ -10,7 +10,6 @@ export default {
     apiTesting: '接口测试',
     uiAutomation: 'UI自动化测试',
     defects: 'Bug缺陷管理',
-    appAutomation: 'APP自动化测试',
     aiIntelligentMode: 'AI 智能模式',
     configuration: '配置中心'
   },
@@ -51,11 +50,6 @@ export default {
     scriptList: '脚本列表',
     suiteManagement: '套件管理',
     executionRecords: '执行记录',
-
-    // APP自动化
-    deviceManagement: '设备管理',
-    packageManagement: '包名管理',
-    caseDesign: '用例编排',
 
     // AI智能模式
     aiIntelligentTesting: 'AI 智能测试',

@@ -43,6 +43,14 @@ from .serializers import (
     AICaseSerializer, AIExecutionRecordSerializer
 )
 from .operation_logger import log_operation
+from .runtime_context import (
+    LOGIN_PASSWORD_PLACEHOLDER,
+    LOGIN_USERNAME_PLACEHOLDER,
+    build_runtime_task_description,
+    get_allowed_domains,
+    redact_sensitive_data,
+    validate_http_url,
+)
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -3447,26 +3455,77 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
     def run_adhoc(self, request):
         """执行临时 AI 任务"""
         project_id = request.data.get('project_id')
-        task_description = request.data.get('task_description')
+        task_description = str(request.data.get('task_description') or '').strip()
         execution_mode = request.data.get('execution_mode', 'text')  # 默认文本模式
         enable_gif = request.data.get('enable_gif', True)  # GIF录制开关，默认开启
 
         if not task_description:
             return Response({'error': '缺少任务描述参数'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 获取项目对象（如果提供了project_id）
+        # 获取当前用户有权访问的项目（如果提供了project_id）
         project = None
         if project_id:
-            try:
-                project = UiProject.objects.get(id=project_id)
-            except UiProject.DoesNotExist:
+            project = UiProject.objects.filter(
+                models.Q(owner=request.user) | models.Q(members=request.user),
+                id=project_id,
+            ).distinct().first()
+            if project is None:
                 return Response({'error': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        login_username = str(request.data.get('login_username') or '').strip()
+        login_password = str(request.data.get('login_password') or '')
+        if bool(login_username) != bool(login_password):
+            return Response(
+                {'error': '登录账号和密码必须同时填写'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            target_url = validate_http_url(
+                request.data.get('target_url') or (project.base_url if project else ''),
+                '目标地址',
+            )
+            login_url = validate_http_url(
+                request.data.get('login_url') or target_url,
+                '登录地址',
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if login_username and not login_url:
+            return Response(
+                {'error': '填写登录账号和密码时必须提供登录地址或目标地址'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sensitive_values = tuple(
+            value for value in (login_username, login_password) if value
+        )
+        safe_task_description = redact_sensitive_data(
+            task_description,
+            sensitive_values,
+        )
+        sensitive_data = {}
+        allowed_domains = []
+        if login_username and login_password:
+            sensitive_data = {
+                LOGIN_USERNAME_PLACEHOLDER: login_username,
+                LOGIN_PASSWORD_PLACEHOLDER: login_password,
+            }
+            allowed_domains = get_allowed_domains(target_url, login_url)
+        runtime_task_description = build_runtime_task_description(
+            safe_task_description,
+            target_url=target_url,
+            login_url=login_url,
+            login_username=login_username,
+            login_password=login_password,
+        )
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
             project=project,
             case_name="Adhoc Task",
-            task_description=task_description,
+            task_description=safe_task_description,
             execution_mode=execution_mode,
             status='running',
             executed_by=request.user,
@@ -3540,12 +3599,16 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     return execution_record.status == 'stopped'
 
                 async def on_analysis_complete(planned_tasks):
-                    execution_record.planned_tasks = planned_tasks
+                    execution_record.planned_tasks = redact_sensitive_data(
+                        planned_tasks,
+                        sensitive_values,
+                    )
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
 
                 async def on_step_update(step_info):
                     try:
+                        step_info = redact_sensitive_data(step_info, sensitive_values)
                         # 处理日志
                         if step_info.get('type') == 'log':
                             content = step_info.get('content')
@@ -3599,13 +3662,16 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                         logger.error(f"更新步骤状态失败: {e}", exc_info=True)
 
                 history = run_full_process_sync(
-                    task_description,
+                    runtime_task_description,
                     analysis_callback=on_analysis_complete,
                     step_callback=on_step_update,
                     should_stop=should_stop_async,  # 传递异步版本
                     execution_mode=execution_mode,
                     enable_gif=enable_gif,  # 传递GIF录制开关
-                    case_name=task_description[:50] if task_description else "Adhoc Task"  # 传递用例名称用于GIF文件命名
+                    case_name=safe_task_description[:50] if safe_task_description else "Adhoc Task",  # 传递用例名称用于GIF文件命名
+                    sensitive_values=sensitive_values,
+                    sensitive_data=sensitive_data,
+                    allowed_domains=allowed_domains,
                 )
 
                 # 检查是否是手动停止 (使用同步版本)
@@ -3652,7 +3718,10 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     if hasattr(history, 'steps'):
                         steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
 
-                execution_record.steps_completed = steps
+                execution_record.steps_completed = redact_sensitive_data(
+                    steps,
+                    sensitive_values,
+                )
 
                 # 自动标记已完成的任务
                 if execution_record.planned_tasks:
@@ -3668,7 +3737,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 safe_save(execution_record)
 
             except Exception as e:
-                error_message = str(e)
+                error_message = redact_sensitive_data(str(e), sensitive_values)
                 failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
                 execution_record.status = 'failed'
                 execution_record.end_time = timezone.now()

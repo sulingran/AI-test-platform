@@ -38,7 +38,6 @@ export const sourceOptions = [
   { label: '手工测试', value: 'manual' },
   { label: 'API 测试', value: 'api_testing' },
   { label: 'UI 自动化', value: 'ui_automation' },
-  { label: 'APP 自动化', value: 'app_automation' },
   { label: '生产反馈', value: 'production' }
 ]
 

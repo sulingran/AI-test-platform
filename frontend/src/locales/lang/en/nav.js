@@ -10,7 +10,6 @@ export default {
     apiTesting: 'API Testing',
     uiAutomation: 'UI Automation Testing',
     defects: 'Bug Management',
-    appAutomation: 'APP Automation',
     aiIntelligentMode: 'AI Intelligent Mode',
     configuration: 'Configuration Center'
   },
@@ -51,11 +50,6 @@ export default {
     scriptList: 'Script List',
     suiteManagement: 'Suite Management',
     executionRecords: 'Execution Records',
-
-    // APP Automation
-    deviceManagement: 'Device Management',
-    packageManagement: 'Package Management',
-    caseDesign: 'Case Design',
 
     // AI Intelligent Mode
     aiIntelligentTesting: 'AI Intelligent Testing',

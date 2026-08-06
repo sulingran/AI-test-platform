@@ -70,6 +70,12 @@ frontend/.DS_Store
 frontend/*.log
 frontend/dist/
 
+# 本地公司资料和个人学习文档，不上传到公共仓库
+docs/company-input/
+docs/TestHub新人上手与操作指南.md
+docs/公司需求与北向接口测试映射模板.md
+docs/北向接口测试入门第一课-设备查询.md
+
 # Docker
 Dockerfile*
 docker-compose*.yml
@@ -77,3 +83,11 @@ docker-compose*.yml
 nginx.conf
 Makefile
 build-multiplatform.sh
+
+# Local dependency caches
+.conda-pkgs/
+.npm-cache/
+.pip-cache/
+.testhub-processes.json
+.chrome-test/
+.browser-use/

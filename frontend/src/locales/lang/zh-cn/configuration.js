@@ -195,7 +195,8 @@ export default {
     },
     roles: {
       writer: '测试用例编写专家',
-      reviewer: '测试评审专家'
+      reviewer: '测试评审专家',
+      browser_use_text: '浏览器 UI 测试'
     },
     messages: {
       loadFailed: '加载配置失败',

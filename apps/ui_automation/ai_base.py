@@ -6,6 +6,39 @@ import os
 
 # 禁用 browser-use 遥测
 os.environ['ANONYMIZED_TELEMETRY'] = 'false'
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RUNTIME_DIR = os.path.join(PROJECT_ROOT, '.browser-use')
+RUNTIME_TEMP_DIR = os.path.join(RUNTIME_DIR, 'tmp')
+os.makedirs(RUNTIME_TEMP_DIR, exist_ok=True)
+os.environ.setdefault('BROWSER_USE_CONFIG_DIR', RUNTIME_DIR)
+if not os.path.isdir(os.environ.get('TEMP', '')) or not os.access(os.environ['TEMP'], os.W_OK):
+    os.environ['TEMP'] = RUNTIME_TEMP_DIR
+    os.environ['TMP'] = RUNTIME_TEMP_DIR
+import tempfile
+tempfile.tempdir = RUNTIME_TEMP_DIR
+
+# browser-use currently hard-codes its default download directory to /tmp.
+# On Windows that resolves to C:\\tmp, which is often not writable. Patch the
+# validator function before importing modules that create the default profile.
+try:
+    import browser_use.browser.profile as _browser_profile_module
+    from browser_use.browser.profile import BrowserProfile as _BrowserProfile
+
+    _browser_profile_module.TESTHUB_DOWNLOADS_DIR = os.path.join(RUNTIME_DIR, 'downloads')
+
+    def _set_testhub_downloads_path(self):
+        if self.downloads_path is None:
+            self.downloads_path = Path(TESTHUB_DOWNLOADS_DIR)
+            self.downloads_path.mkdir(parents=True, exist_ok=True)
+        return self
+
+    _download_validator = _BrowserProfile.__pydantic_decorators__.model_validators.get(
+        'set_default_downloads_path'
+    )
+    if _download_validator:
+        _download_validator.func.__code__ = _set_testhub_downloads_path.__code__
+except Exception as _browser_profile_error:
+    logger.warning(f"Failed to configure browser-use runtime directories: {_browser_profile_error}")
 
 import asyncio
 import functools
@@ -13,6 +46,8 @@ import json
 import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+
+from .runtime_context import normalize_openai_base_url
 
 # 加载环境变量
 load_dotenv()
@@ -914,13 +949,20 @@ from typing import Any
 
 
 class RawResponseLogger(BaseCallbackHandler):
+    def __init__(self, sensitive_values=None):
+        from .runtime_context import redact_sensitive_data
+
+        self.sensitive_values = tuple(sensitive_values or ())
+        self._redact = redact_sensitive_data
+
     def on_llm_new_token(self, token: str, **kwargs: Any) -> Any:
         pass
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
         try:
             generation = response.generations[0][0]
-            logger.info(f"DEBUG: Raw LLM Response: {generation.text}")
+            safe_text = self._redact(generation.text, self.sensitive_values)
+            logger.info(f"DEBUG: Raw LLM Response: {safe_text}")
         except:
             pass
 
@@ -935,10 +977,21 @@ from browser_use.browser.profile import BrowserProfile
 
 
 class BaseBrowserAgent:
-    def __init__(self, execution_mode='text', enable_gif=True, case_name=None):
+    def __init__(
+        self,
+        execution_mode='text',
+        enable_gif=True,
+        case_name=None,
+        sensitive_values=None,
+        sensitive_data=None,
+        allowed_domains=None,
+    ):
         self.execution_mode = 'text'
         self.enable_gif = enable_gif  # GIF录制开关
         self.case_name = case_name or "Adhoc Task"  # 用例名称
+        self.sensitive_values = tuple(sensitive_values or ())
+        self.sensitive_data = dict(sensitive_data or {})
+        self.allowed_domains = list(allowed_domains or [])
 
         # Load Config from DB
         from apps.requirement_analysis.models import AIModelConfig
@@ -958,7 +1011,8 @@ class BaseBrowserAgent:
             }
 
         self.api_key = model_config.get('api_key') or os.getenv('AUTH_TOKEN')
-        self.base_url = model_config.get('base_url') or os.getenv('BASE_URL')
+        configured_base_url = model_config.get('base_url') or os.getenv('BASE_URL')
+        self.base_url = normalize_openai_base_url(configured_base_url)
         self.model_name = model_config.get('model_name') or os.getenv('MODEL_NAME')
         self.provider = model_config.get('provider', 'openai')
 
@@ -1001,7 +1055,7 @@ class BaseBrowserAgent:
             api_key=self.api_key,
             base_url=self.base_url,
             temperature=final_temperature,
-            callbacks=[RawResponseLogger()]
+            callbacks=[RawResponseLogger(self.sensitive_values)]
         )
 
         # browser-use requirement
@@ -1479,7 +1533,8 @@ class BaseBrowserAgent:
             wait_for_network_idle_page_load_time=0.2,
             minimum_wait_page_load_time=0.05,
             wait_between_actions=0.1,
-            enable_default_extensions=False
+            enable_default_extensions=False,
+            allowed_domains=self.allowed_domains or None,
         )
 
     async def run_task(self, task_description: str, planned_tasks=None, callback=None, should_stop=None):
@@ -1699,6 +1754,7 @@ class BaseBrowserAgent:
             llm=self.llm,
             controller=controller,
             browser_profile=browser_profile,
+            sensitive_data=self.sensitive_data or None,
             use_vision=False,
             max_actions_per_step=10,  # 增加步进密度，减少总步骤数，降低超时风险
             max_retries=1,  # 减少重试次数以提高速度 (从2改为1)

@@ -211,7 +211,7 @@ class AIModelConfig(models.Model):
     ROLE_CHOICES = [
         ('writer', '测试用例编写专家'),
         ('reviewer', '测试评审专家'),
-        ('browser_use_text', 'Browser Use - 文本模式'),
+        ('browser_use_text', '浏览器 UI 测试'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')

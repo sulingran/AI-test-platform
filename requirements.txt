@@ -177,17 +177,7 @@ PyJWT>=2.8.0
 # 测试数据生成
 fakerx>=0.1.0
 
-# APP自动化测试依赖包
-airtest==1.4.3
-loguru==0.7.3
 Pillow==12.1.0
 
-# OCR 文字识别支持
-easyocr==1.7.2
-opencv-contrib-python==4.6.0.66
-numpy==1.26.4
-
-# websocket推送进度
+# ASGI 服务
 daphne==4.2.1
-channels==4.3.2
-channels-redis==4.3.0

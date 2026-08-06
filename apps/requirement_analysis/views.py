@@ -919,8 +919,8 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
         if role:
             queryset = queryset.filter(role=role)
         else:
-            # 如果没有指定角色，默认排除 AI智能模式专用模型
-            queryset = queryset.exclude(role__in=['browser_use_text', 'browser_use_vision'])
+            # 浏览器文本模式已接入通用配置页；视觉模式仍由专用功能负责，避免展示未接入的旧配置。
+            queryset = queryset.exclude(role='browser_use_vision')
 
         # 按是否启用过滤
         is_active = self.request.query_params.get('is_active')

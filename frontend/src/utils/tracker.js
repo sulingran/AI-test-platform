@@ -59,7 +59,6 @@ function resolveModule(path = '') {
   if (path.startsWith('/ai-generation')) return 'ai_generation'
   if (path.startsWith('/api-testing')) return 'api_testing'
   if (path.startsWith('/ui-automation')) return 'ui_automation'
-  if (path.startsWith('/app-automation')) return 'app_automation'
   if (path.startsWith('/ai-intelligent-mode')) return 'ai_intelligent_mode'
   if (path.startsWith('/data-factory')) return 'data_factory'
   if (path.startsWith('/configuration')) return 'configuration'

@@ -4,6 +4,8 @@ import re
 import os  # Added import
 import json
 import time
+import uuid
+import hashlib
 from rest_framework import viewsets, status
 from django.conf import settings  # Added import
 from rest_framework.decorators import action, permission_classes
@@ -23,7 +25,7 @@ class PassThroughRenderer(BaseRenderer):
         return data
 
 
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -183,6 +185,83 @@ class RequirementDocumentViewSet(viewsets.ModelViewSet):
                 {'error': f'提取文本失败: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='chat',
+        renderer_classes=[PassThroughRenderer],
+        permission_classes=[AllowAny],
+        parser_classes=[JSONParser]
+    )
+    def chat(self, request, pk=None):
+        """文档AI对话：根据用户指令从文档中定位功能并生成测试用例"""
+        document = self.get_object()
+
+        user_message = request.data.get('message', '').strip()
+        if not user_message:
+            return Response(
+                {'error': '消息不能为空'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 确保文档已提取文本
+        if not document.extracted_text:
+            try:
+                document.extracted_text = DocumentProcessor.extract_text(document)
+                document.save()
+            except Exception as e:
+                return Response(
+                    {'error': f'文档文本提取失败: {str(e)}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+        # 获取活跃的编写模型和提示词配置
+        writer_config = AIModelConfig.objects.filter(role='writer', is_active=True).first()
+        if not writer_config:
+            return Response(
+                {'error': '未找到可用的测试用例编写模型配置'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        writer_prompt = PromptConfig.get_active_config('writer')
+        if not writer_prompt:
+            return Response(
+                {'error': '未找到可用的测试用例编写提示词配置'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        async def generate():
+            """异步生成器，流式输出"""
+            try:
+                from .models import AIModelService, GenerationConfig
+
+                async def save_callback(chunk):
+                    pass
+
+                content = await AIModelService.generate_test_cases_from_chat(
+                    document_text=document.extracted_text,
+                    user_message=user_message,
+                    writer_model_config=writer_config,
+                    writer_prompt=writer_prompt.content,
+                    callback=save_callback
+                )
+
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+
+            except Exception as e:
+                logger.error(f"文档对话生成失败: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        response = StreamingHttpResponse(
+            generate(),
+            content_type='text/event-stream',
+            status=200
+        )
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'
+        return response
 
 
 class RequirementAnalysisViewSet(viewsets.ReadOnlyModelViewSet):
@@ -918,9 +997,7 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
         role = self.request.query_params.get('role')
         if role:
             queryset = queryset.filter(role=role)
-        else:
-            # 浏览器文本模式已接入通用配置页；视觉模式仍由专用功能负责，避免展示未接入的旧配置。
-            queryset = queryset.exclude(role='browser_use_vision')
+        # 不指定角色时返回全部（含 Browser Use 角色，由前端徽章区分）
 
         # 按是否启用过滤
         is_active = self.request.query_params.get('is_active')
@@ -2324,7 +2401,7 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def save_to_records(self, request, task_id=None):
-        """保存测试用例到AI生成用例记录并导入到测试用例管理系统"""
+        """保存测试用例到AI生成用例记录（仅入记录，需人工审核采纳后才进入测试用例管理系统）"""
         try:
             # DRF会根据lookup_field自动从URL提取task_id并调用get_object()
             task = self.get_object()
@@ -2344,78 +2421,13 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
             # 检查是否已经保存过
             if hasattr(task, 'is_saved_to_records') and task.is_saved_to_records:
                 return Response(
-                    {'message': '测试用例已经保存到记录中', 'already_saved': True},
+                    {'message': '测试用例已经保存到记录中，请勿重复保存', 'already_saved': True},
                     status=status.HTTP_200_OK
                 )
 
-            # 解析并导入测试用例到测试用例管理系统
+            # 仅解析用于统计条数，不再直接导入测试用例管理系统
             test_cases = self._parse_test_cases_content(task.final_test_cases)
-
-            if test_cases:
-                try:
-                    from apps.testcases.models import TestCase
-                    from apps.projects.models import Project
-                    from django.db import models
-
-                    # 优先使用任务关联的项目
-                    if task.project:
-                        project = task.project
-                        logger.info(f"使用任务关联的项目: {project.name}")
-                    else:
-                        # 回退到项目选择逻辑
-                        user = task.created_by
-                        accessible_projects = Project.objects.filter(
-                            models.Q(owner=user) | models.Q(members=user)
-                        ).distinct()
-
-                        # 尝试从前端获取项目ID
-                        project_id = request.data.get('project_id')
-
-                        if project_id:
-                            try:
-                                project = accessible_projects.get(id=project_id)
-                            except Project.DoesNotExist:
-                                # 如果指定项目不存在或无权限，使用第一个可访问的项目
-                                project = accessible_projects.first()
-                                if not project:
-                                    # 如果用户没有任何项目，创建默认项目
-                                    project = Project.objects.create(
-                                        name="默认项目",
-                                        owner=user,
-                                        description='系统自动创建的默认项目'
-                                    )
-                        else:
-                            # 没有指定项目，使用第一个可访问的项目
-                            project = accessible_projects.first()
-                            if not project:
-                                # 如果用户没有任何项目，创建默认项目
-                                project = Project.objects.create(
-                                    name="默认项目",
-                                    owner=user,
-                                    description='系统自动创建的默认项目'
-                                )
-
-                    adopted_count = 0
-                    for test_case in test_cases:
-                        TestCase.objects.create(
-                            project=project,
-                            author=task.created_by,
-                            title=test_case.get('scenario', '测试用例'),
-                            description=test_case.get('scenario', ''),
-                            preconditions=test_case.get('precondition', ''),
-                            steps=test_case.get('steps', ''),
-                            expected_result=test_case.get('expected', ''),
-                            priority=self._map_priority(test_case.get('priority', '中')),
-                            test_type='functional',
-                            status='draft'
-                        )
-                        adopted_count += 1
-
-                    logger.info(f"成功导入 {adopted_count} 条测试用例到项目 {project.name}")
-
-                except Exception as import_error:
-                    logger.error(f"导入测试用例失败: {import_error}")
-                    # 即使导入失败，仍然标记为已保存
+            case_count = len(test_cases) if test_cases else 0
 
             # 标记任务为已保存
             task.is_saved_to_records = True
@@ -2423,14 +2435,105 @@ class TestCaseGenerationTaskViewSet(viewsets.ModelViewSet):
             task.save(update_fields=['is_saved_to_records', 'saved_at'])
 
             return Response({
-                'message': '测试用例已成功保存到AI生成用例记录并导入到测试用例管理系统',
+                'message': '测试用例已保存到AI生成用例记录，请在记录中审核后采纳',
                 'task_id': task.task_id,
                 'saved_at': task.saved_at,
-                'imported_count': adopted_count if test_cases else 0
+                'case_count': case_count
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"保存测试用例到记录时出错: {e}")
+            return Response(
+                {'error': f'保存失败: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'], url_path='save-from-content')
+    def save_from_content(self, request):
+        """将AI对话直接生成的测试用例内容保存到AI生成用例记录（需人工审核采纳后才进入测试用例管理系统）"""
+        try:
+            content = (request.data.get('content') or '').strip()
+            if not content:
+                return Response(
+                    {'error': '没有测试用例内容可以保存'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # 解析对话生成的用例内容（复用原生解析逻辑，用于校验与统计）
+            test_cases = self._parse_test_cases_content(content)
+            if not test_cases:
+                return Response(
+                    {'error': '未能从内容中解析出测试用例，请确认输出为标准的表格或结构化格式'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            from apps.projects.models import Project
+            from django.db import models
+
+            user = request.user
+            project_id = request.data.get('project_id')
+
+            # 选项目：优先使用前端指定且用户可访问的项目，否则回退到第一个可访问项目
+            accessible_projects = Project.objects.filter(
+                models.Q(owner=user) | models.Q(members=user)
+            ).distinct()
+
+            project = None
+            if project_id:
+                try:
+                    project = accessible_projects.get(id=project_id)
+                except (Project.DoesNotExist, ValueError, TypeError):
+                    project = None
+
+            if not project:
+                project = accessible_projects.first()
+
+            # 防重复保存：同一用户保存过完全相同内容的记录则直接返回
+            content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+            existing_tasks = TestCaseGenerationTask.objects.filter(
+                created_by=user,
+                is_saved_to_records=True
+            ).only('id', 'task_id', 'title', 'final_test_cases')
+
+            for existing in existing_tasks:
+                if existing.final_test_cases and \
+                        hashlib.md5(existing.final_test_cases.encode('utf-8')).hexdigest() == content_hash:
+                    return Response({
+                        'message': '该用例内容已保存到AI生成用例记录，请勿重复保存',
+                        'already_saved': True,
+                        'task_id': existing.task_id
+                    }, status=status.HTTP_200_OK)
+
+            # 创建生成任务记录（仅入记录，不直接创建测试用例）
+            title = (request.data.get('title') or '').strip()
+            if not title:
+                title = f"AI对话生成用例 {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+
+            task = TestCaseGenerationTask.objects.create(
+                task_id=f"CHAT_{uuid.uuid4().hex[:8].upper()}",
+                title=title[:200],
+                requirement_text='AI对话直接生成的测试用例',
+                status='completed',
+                progress=100,
+                project=project,
+                generated_test_cases=content,
+                final_test_cases=content,
+                created_by=user,
+                completed_at=timezone.now(),
+                is_saved_to_records=True,
+                saved_at=timezone.now()
+            )
+
+            logger.info(f"AI对话用例已保存到记录: task_id={task.task_id}, 用例数={len(test_cases)}")
+            return Response({
+                'message': '测试用例已保存到AI生成用例记录，请前往记录审核后采纳',
+                'task_id': task.task_id,
+                'case_count': len(test_cases),
+                'project_id': project.id if project else None
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"AI对话用例保存失败: {e}")
             return Response(
                 {'error': f'保存失败: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -3317,7 +3420,10 @@ class ConfigStatusViewSet(viewsets.ViewSet):
                     'id': generation_config.id if generation_config else None,
                     'required': True,
                     'default_output_mode': generation_config.default_output_mode if generation_config else None,
-                    'enable_auto_review': generation_config.enable_auto_review if generation_config else None
+                    'enable_auto_review': generation_config.enable_auto_review if generation_config else None,
+                    'max_functional_cases_per_feature': generation_config.max_functional_cases_per_feature if generation_config else 5,
+                    'max_performance_cases_per_feature': generation_config.max_performance_cases_per_feature if generation_config else 3,
+                    'max_other_cases_per_feature': generation_config.max_other_cases_per_feature if generation_config else 3
                 }
             }
 

@@ -11,11 +11,16 @@ try:
     from PyPDF2 import PdfReader
 except ImportError:
     from PyPDF2 import PdfFileReader as PdfReader
-    
+
 try:
     import docx
 except ImportError:
     docx = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 from django.conf import settings
 from django.core.files.storage import default_storage
 
@@ -70,12 +75,40 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"文本文件读取失败: {e}")
             return f"文本文件读取失败: {str(e)}"
+
+    @staticmethod
+    def extract_text_from_xlsx(file_path: str) -> str:
+        """从 Excel 文件提取结构化文本，保留行列关系"""
+        if openpyxl is None:
+            return "Excel文件提取失败: openpyxl库未安装"
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            all_text = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                # 重置维度以获取准确的行列数（金盾版 xlsx 需要此操作）
+                try:
+                    ws.reset_dimensions()
+                except Exception:
+                    pass
+                sheet_text = [f"=== 工作表: {sheet_name} ==="]
+                for row in ws.iter_rows(values_only=True):
+                    # 跳过完全空行
+                    if row and any(cell is not None for cell in row):
+                        row_values = [str(cell) if cell is not None else '' for cell in row]
+                        sheet_text.append(' | '.join(row_values))
+                all_text.append('\n'.join(sheet_text))
+            wb.close()
+            return '\n\n'.join(all_text).strip()
+        except Exception as e:
+            logger.error(f"Excel文件文本提取失败: {e}")
+            return f"Excel文件文本提取失败: {str(e)}"
     
     @classmethod
     def extract_text(cls, document: RequirementDocument) -> str:
         """根据文档类型提取文本"""
         file_path = document.file.path
-        
+
         if document.document_type == 'pdf':
             return cls.extract_text_from_pdf(file_path)
         elif document.document_type == 'docx':
@@ -84,6 +117,8 @@ class DocumentProcessor:
             return cls.extract_text_from_txt(file_path)
         elif document.document_type == 'md':
             return cls.extract_text_from_txt(file_path)
+        elif document.document_type == 'xlsx':
+            return cls.extract_text_from_xlsx(file_path)
         else:
             return "不支持的文档类型"
 

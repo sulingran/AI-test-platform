@@ -112,6 +112,8 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             validated_data['document_type'] = 'txt'
         elif file.name.lower().endswith('.md'):
             validated_data['document_type'] = 'md'
+        elif file.name.lower().endswith(('.xls', '.xlsx')):
+            validated_data['document_type'] = 'xlsx'
         
         # 设置文件大小
         validated_data['file_size'] = file.size
@@ -301,6 +303,8 @@ class GenerationConfigSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'default_output_mode', 'default_output_mode_display',
             'enable_auto_review', 'review_timeout',
+            'max_functional_cases_per_feature', 'max_performance_cases_per_feature',
+            'max_other_cases_per_feature',
             'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']

@@ -91,3 +91,62 @@ build-multiplatform.sh
 .testhub-processes.json
 .chrome-test/
 .browser-use/
+
+# ===== 本机真实环境测试新增排敏项（沿用上方「不上传公共仓库」惯例）=====
+
+# 真实环境接口测试资料（含内网 IP / 真实 token / 产品清单 / PDF / 接口契约，不上传）
+docs/setup/
+docs/video_base_1.1/
+docs/APP/
+certs/
+
+# 本机真实环境/APP 遗留（含内网 IP / 二进制驱动 / 内部 docx，不上传）
+webdrivers/
+docs/manage.py
+docs/_login_index_js_cache.txt
+docs/postman自动化接口测试.docx
+
+# 根目录一次性调试 / 落库 / 验证脚本（含真实环境凭据或本机路径）
+start-testhub.ps1
+verify_browser.py
+probe_*.py
+inspect_*.py
+create_real_api_cases.py
+create_query_api_cases.py
+fill_execute_api_tests.py
+regenerate_parts.py
+regenerate_part12.py
+update_query_api_cases.py
+verify_query_api_cases.py
+cleanup_duplicates.py
+cleanup_empty_collection.py
+dump_api_state.py
+run_real_env_check.py
+run_c3m_api_test_flow.py
+mock_c3m_server.py
+setup_ai_config.py
+api_test_results*.json
+probe_*.json
+temp_*.txt
+
+# 日志（根目录 daphne 日志；logs/ 已在上方忽略）
+*.log
+backend_daphne.err.log
+backend_daphne.out.log
+
+# APP 自动化已下线：公共仓库仅保留包空壳（__init__.py），不上传完整实现
+apps/app_automation/*.py
+!apps/app_automation/__init__.py
+apps/app_automation/views/
+apps/app_automation/utils/
+apps/app_automation/runners/
+apps/app_automation/managers/
+apps/app_automation/executors/
+apps/app_automation/tests/
+
+# APP 自动化前端已下线：不上传孤儿文件
+frontend/src/views/app-automation/
+frontend/src/api/app-automation.js
+frontend/src/utils/app-automation-helpers.js
+frontend/src/locales/lang/en/app-automation.js
+frontend/src/locales/lang/zh-cn/app-automation.js

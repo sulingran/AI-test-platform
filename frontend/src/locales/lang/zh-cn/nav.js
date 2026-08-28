@@ -1,6 +1,7 @@
 export default {
   nav: {
     home: '首页',
+    back: '返回',
     logout: '退出登录',
     profile: '个人设置',
     language: '语言切换'
@@ -50,6 +51,7 @@ export default {
     scriptList: '脚本列表',
     suiteManagement: '套件管理',
     executionRecords: '执行记录',
+
 
     // AI智能模式
     aiIntelligentTesting: 'AI 智能测试',

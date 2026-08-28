@@ -6,6 +6,7 @@ import json
 import httpx
 import asyncio
 from typing import Dict, Any, List, AsyncIterator
+from asgiref.sync import sync_to_async
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class RequirementDocument(models.Model):
         ('docx', 'Word文档'),
         ('txt', '文本文档'),
         ('md', 'Markdown文档'),
+        ('xlsx', 'Excel文档'),
     ]
 
     STATUS_CHOICES = [
@@ -211,7 +213,8 @@ class AIModelConfig(models.Model):
     ROLE_CHOICES = [
         ('writer', '测试用例编写专家'),
         ('reviewer', '测试评审专家'),
-        ('browser_use_text', '浏览器 UI 测试'),
+        ('browser_use_text', 'Browser Use - 文本模式'),
+        ('browser_use_vision', 'Browser Use - 视觉模式'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -306,6 +309,23 @@ class GenerationConfig(models.Model):
         default=120,
         verbose_name='评审和改进超时时间（秒）',
         help_text='AI评审和改进的最大等待时间（总时长）'
+    )
+
+    # 用例数量边界控制
+    max_functional_cases_per_feature = models.IntegerField(
+        default=5,
+        verbose_name='每功能点最大功能用例数',
+        help_text='每个功能点生成的功能测试用例数上限（包含1个主流程）'
+    )
+    max_performance_cases_per_feature = models.IntegerField(
+        default=3,
+        verbose_name='每功能点最大性能用例数',
+        help_text='每个功能点生成的性能测试用例数上限（必须包含参数边界）'
+    )
+    max_other_cases_per_feature = models.IntegerField(
+        default=3,
+        verbose_name='每功能点最大其他用例数',
+        help_text='每个功能点生成的其他类型（安全、兼容性等）用例数上限'
     )
 
     is_active = models.BooleanField(default=True, verbose_name='是否启用')
@@ -820,20 +840,27 @@ class AIModelService:
         """
         writer_prompt = task.writer_prompt_config.content
 
+        # 读取生成行为配置中的数量边界
+        gen_config = await sync_to_async(GenerationConfig.get_active_config)()
+        max_func = gen_config.max_functional_cases_per_feature if gen_config else 5
+        max_perf = gen_config.max_performance_cases_per_feature if gen_config else 3
+        max_other = gen_config.max_other_cases_per_feature if gen_config else 3
+
         # 构建用户提示
         user_message = (
-            f"请深入分析以下需求文档，并设计高覆盖率的测试用例。\n\n"
-            f"【生成指令】\n"
-            f"1. **数量原则**：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
-            f"2. **深度遍历策略**：\n"
-            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
-            f"   - 对每个功能点，必须设计：1个正常场景 + 2-3个异常/边界场景。\n"
-            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'、'输入特殊字符'等独立用例。\n"
-            f"4. **场景扩展库**：\n"
-            f"   - 数据完整性（必填项、默认值、数据类型）\n"
-            f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
-            f"   - 外部接口异常（超时、断网、返回错误）\n"
-            f"   - UI交互体验（提示文案、跳转逻辑、防误触）\n"
+            f"请深入分析以下需求文档，并为每个功能点设计测试用例。\n\n"
+            f"【生成约束（必须严格遵守）】\n"
+            f"1. **数量边界**：\n"
+            f"   - 功能测试用例：每个功能点只生成 1 个主流程（Happy Path）+ 最多 {max_func - 1} 个其他流程（异常/边界/权限等），总计不超过 {max_func} 个\n"
+            f"   - 性能测试用例：每个功能点最多 {max_perf} 个，每个用例必须包含明确的参数边界（最小值、最大值、临界值）\n"
+            f"   - 其他类型用例（安全、兼容性等）：每个功能点最多 {max_other} 个\n"
+            f"2. **数量控制原则**：\n"
+            f"   - 不要为每个功能点生成大量用例，控制在个位数以内\n"
+            f"   - 优先保证主流程和关键边界场景的覆盖\n"
+            f"   - 如果一个功能点较简单，1-2个用例即可，不要为了凑数而生成冗余用例\n"
+            f"3. **深度遍历策略**：\n"
+            f"   - 请按文档结构逐章节分析每个功能点，不要遗漏末尾的功能点\n"
+            f"4. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'等独立用例\n"
             f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
             f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
             f"   - **绝对不能跳号、重复或乱序输出**\n"
@@ -881,6 +908,62 @@ class AIModelService:
         # 统计生成的用例数量
         case_count = full_content.count('TC-') + full_content.count('TEST-') + full_content.count('测试用例')
         logger.info(f"生成用例统计: 约检测到{case_count}个用例编号标记")
+
+        return full_content
+
+    @staticmethod
+    async def generate_test_cases_from_chat(
+            document_text: str,
+            user_message: str,
+            writer_model_config: AIModelConfig,
+            writer_prompt: str,
+            callback=None
+    ) -> str:
+        """
+        根据用户对话指令，从文档中定位相关功能并生成测试用例
+        """
+        gen_config = await sync_to_async(GenerationConfig.get_active_config)()
+        max_func = gen_config.max_functional_cases_per_feature if gen_config else 5
+        max_perf = gen_config.max_performance_cases_per_feature if gen_config else 3
+        max_other = gen_config.max_other_cases_per_feature if gen_config else 3
+
+        prompt_message = (
+            f"请根据以下需求文档，针对用户指定的功能生成测试用例。\n\n"
+            f"【用户指令】\n{user_message}\n\n"
+            f"【生成约束（必须严格遵守）】\n"
+            f"1. 数量边界：\n"
+            f"   - 功能测试用例：每个功能点只生成 1 个主流程 + 最多 {max_func - 1} 个其他流程，总计不超过 {max_func} 个\n"
+            f"   - 性能测试用例：每个功能点最多 {max_perf} 个，每个用例必须包含明确的参数边界\n"
+            f"   - 其他类型用例：每个功能点最多 {max_other} 个\n"
+            f"2. 只生成用户指令中明确要求的功能点对应的测试用例\n"
+            f"3. 请仔细阅读文档，找到用户指令中提到的功能相关的章节和内容\n"
+            f"4. 如果文档中找不到用户指定的功能，请明确告知\n"
+            f"5. 拒绝合并：严禁将多个验证点合并在一条用例中\n"
+            f"6. 所有用例必须一次性完整输出，不能中断\n"
+            f"7. 输出格式使用Markdown表格\n\n"
+            f"【需求文档内容】\n{document_text}"
+        )
+
+        messages = [
+            {"role": "system", "content": writer_prompt},
+            {"role": "user", "content": prompt_message}
+        ]
+
+        generator = AIModelService.call_openai_compatible_api_stream(
+            writer_model_config,
+            messages,
+            callback=callback
+        )
+
+        full_content = ""
+        try:
+            async for chunk in generator:
+                full_content += chunk
+        finally:
+            try:
+                await generator.aclose()
+            except Exception:
+                pass
 
         return full_content
 

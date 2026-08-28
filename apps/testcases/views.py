@@ -131,7 +131,7 @@ class TestCaseDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):
         user = self.request.user
         project_id = self.request.data.get('project_id')
-        
+
         if project_id:
             # 检查指定的项目是否存在且用户有权限
             accessible_projects = self.get_user_accessible_projects(user)
@@ -144,6 +144,36 @@ class TestCaseDetailView(generics.RetrieveUpdateDestroyAPIView):
         else:
             # 没有指定项目，保持原项目不变
             serializer.save()
+
+
+class TestCaseBatchDeleteView(APIView):
+    """测试用例批量删除"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        ids = request.data.get('ids', [])
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {'error': '请提供要删除的测试用例ID列表'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 只删除当前用户有权限访问的项目下的用例
+        accessible_projects = get_user_accessible_projects(request.user)
+        queryset = TestCase.objects.filter(
+            id__in=ids,
+            project__in=accessible_projects
+        )
+        found_ids = set(queryset.values_list('id', flat=True))
+        deleted_count, _ = queryset.delete()
+
+        # 无权访问或不存在的ID
+        skipped = [i for i in ids if i not in found_ids]
+
+        return Response({
+            'deleted': deleted_count,
+            'skipped': skipped
+        }, status=status.HTTP_200_OK)
 
 
 class TestCaseImportTemplateDownloadView(APIView):

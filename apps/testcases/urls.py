@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     # 测试用例相关
     path('', views.TestCaseListCreateView.as_view(), name='testcase-list'),
+    path('batch-delete/', views.TestCaseBatchDeleteView.as_view(), name='testcase-batch-delete'),
     path('import/template/', views.TestCaseImportTemplateDownloadView.as_view(), name='testcase-import-template'),
     path('import-records/', views.TestCaseImportRecordListCreateView.as_view(), name='testcase-import-record-list'),
     path('import-records/<int:pk>/', views.TestCaseImportRecordDetailView.as_view(), name='testcase-import-record-detail'),

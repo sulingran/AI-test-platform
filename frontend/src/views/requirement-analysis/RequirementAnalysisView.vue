@@ -114,8 +114,10 @@
     </div>
 
     <div class="main-content">
+      <!-- 输入区域：手动输入 + 文档上传 左右分栏 -->
+      <div class="input-panels" v-if="!isGenerating && !showResults">
       <!-- 手动输入需求描述区域 -->
-      <div class="manual-input-section" v-if="!isGenerating && !showResults">
+      <div class="manual-input-section">
         <div class="manual-input-card">
           <h2>{{ $t('requirementAnalysis.manualInputTitle') }}</h2>
           <div class="input-form">
@@ -159,13 +161,8 @@
         </div>
       </div>
 
-      <!-- 分隔线 -->
-      <div class="divider" v-if="!isGenerating && !showResults">
-        <span>{{ $t('requirementAnalysis.dividerOr') }}</span>
-      </div>
-
       <!-- 文档上传区域 -->
-      <div class="upload-section" v-if="!isGenerating && !showResults">
+      <div class="upload-section">
         <div class="upload-card">
           <h2>{{ $t('requirementAnalysis.uploadTitle') }}</h2>
           <div class="upload-area"
@@ -182,7 +179,7 @@
                 type="file"
                 ref="fileInput"
                 @change="handleFileSelect"
-                accept=".pdf,.doc,.docx,.txt,.md"
+                accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.xls"
                 style="display: none;">
               <button class="select-file-btn" @click="$refs.fileInput.click()">
                 {{ $t('requirementAnalysis.selectFile') }}
@@ -223,12 +220,97 @@
 
             <button
               class="generate-btn"
-              @click="generateFromDocument"
-              :disabled="!documentTitle || isGenerating">
-              <span v-if="isGenerating">{{ $t('requirementAnalysis.generating') }}</span>
-              <span v-else>{{ $t('requirementAnalysis.generateButton') }}</span>
+              @click="extractDocumentAndChat"
+              :disabled="!documentTitle || isExtracting">
+              <span v-if="isExtracting">{{ $t('requirementAnalysis.extracting') }}</span>
+              <span v-else>{{ $t('requirementAnalysis.chatWithAI') }}</span>
             </button>
           </div>
+        </div>
+      </div>
+      </div>
+
+      <!-- AI 对话面板 - 文档上传后显示 -->
+      <div v-if="showChatPanel && !isGenerating && !showResults" class="chat-panel-section">
+        <div class="chat-panel-card">
+          <div class="chat-header">
+            <h2>💬 {{ $t('requirementAnalysis.aiChatTitle') }}</h2>
+            <p class="chat-subtitle">{{ $t('requirementAnalysis.aiChatSubtitle') }}</p>
+            <button class="close-chat-btn" @click="closeChatPanel">{{ $t('requirementAnalysis.backToUpload') }}</button>
+            <button
+              class="clear-chat-btn"
+              @click="clearChatRecords"
+              v-if="chatHistory.length > 0"
+              :title="$t('requirementAnalysis.clearRecords')">
+              🗑️ {{ $t('requirementAnalysis.clearRecords') }}
+            </button>
+          </div>
+
+          <div class="chat-messages" ref="chatMessages">
+            <div v-if="chatHistory.length === 0" class="chat-empty">
+              <div class="chat-empty-icon">🤖</div>
+              <p>{{ $t('requirementAnalysis.chatEmptyHint') }}</p>
+              <div class="chat-suggestions">
+                <p class="suggestion-label">{{ $t('requirementAnalysis.chatSuggestions') }}</p>
+                <button
+                  v-for="(suggestion, idx) in chatSuggestions"
+                  :key="idx"
+                  class="suggestion-btn"
+                  @click="sendSuggestion(suggestion)">
+                  {{ suggestion }}
+                </button>
+              </div>
+            </div>
+
+            <div v-for="(msg, idx) in chatHistory" :key="idx" class="chat-message" :class="msg.role">
+              <div class="message-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+              <div class="message-content">
+                <div class="message-role">{{ msg.role === 'user' ? $t('requirementAnalysis.you') : 'AI' }}</div>
+                <div class="message-text" v-html="formatMarkdown(msg.content)" v-if="!msg.isStreaming"></div>
+                <div class="message-text streaming" v-else>
+                  <span v-html="formatMarkdown(msg.content)"></span><span class="cursor-blink">|</span>
+                </div>
+                <div v-if="msg.role === 'ai' && msg.content && !msg.isStreaming" class="message-actions">
+                  <button class="msg-action-btn" @click="downloadChatTestCase(msg)">
+                    📥 {{ $t('requirementAnalysis.downloadExcel') }}
+                  </button>
+                  <button class="msg-action-btn" @click="saveChatTestCase(msg)">
+                    💾 {{ $t('requirementAnalysis.saveToRecords') }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="isChatLoading" class="chat-message ai">
+              <div class="message-avatar">🤖</div>
+              <div class="message-content">
+                <div class="message-role">AI</div>
+                <div class="message-text">
+                  <span class="typing-indicator">
+                    <span></span><span></span><span></span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chat-input-area">
+            <textarea
+              v-model="chatInput"
+              class="chat-input"
+              :placeholder="$t('requirementAnalysis.chatPlaceholder')"
+              rows="2"
+              @keydown.enter.ctrl="sendChatMessage"
+              @keydown.enter.meta="sendChatMessage"
+              :disabled="isChatLoading"></textarea>
+            <button
+              class="chat-send-btn"
+              @click="sendChatMessage"
+              :disabled="!chatInput.trim() || isChatLoading">
+              {{ $t('requirementAnalysis.send') }}
+            </button>
+          </div>
+          <div class="chat-hint">{{ $t('requirementAnalysis.chatHint') }}</div>
         </div>
       </div>
 
@@ -382,6 +464,16 @@ export default {
       showResults: false,
       generationResult: null,
 
+      // AI 对话面板
+      showChatPanel: false,
+      isExtracting: false,
+      currentDocumentId: null,
+      currentDocumentText: '',
+      chatHistory: [],
+      chatInput: '',
+      isChatLoading: false,
+      chatSuggestions: [],
+
       // AI配置状态
       configStatus: {
         overall_status: 'unknown',
@@ -442,6 +534,8 @@ export default {
     this.progressText = this.$t('requirementAnalysis.preparing')
     this.loadProjects()
     this.checkConfigStatus()
+    // 恢复上次保留的对话记录（如有）
+    this.restoreChatSession()
   },
 
   activated() {
@@ -461,6 +555,8 @@ export default {
     if (this.pollInterval) {
       clearInterval(this.pollInterval)
     }
+    // 离开页面时保存对话记录，确保切换模块后回来仍在
+    this.persistChatSession()
     // 停止token自动刷新定时器
     const userStore = useUserStore()
     userStore.stopAutoRefresh()
@@ -630,11 +726,13 @@ export default {
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
           'text/plain',
           'text/markdown',
-          'text/x-markdown'
+          'text/x-markdown',
+          'application/vnd.ms-excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         ]
 
         if (allowedTypes.includes(file.type) ||
-            file.name.match(/\.(pdf|doc|docx|txt|md)$/i)) {
+            file.name.match(/\.(pdf|doc|docx|txt|md|xlsx|xls)$/i)) {
           this.selectedFile = file
           this.documentTitle = file.name.replace(/\.[^/.]+$/, "")
         } else {
@@ -673,14 +771,17 @@ export default {
       )
     },
 
-    async generateFromDocument() {
+    async extractDocumentAndChat() {
       if (!this.selectedFile || !this.documentTitle) {
         ElMessage.error(this.$t('requirementAnalysis.selectFileAndTitle'))
         return
       }
 
       try {
-        // 首先上传并提取文档内容
+        this.isExtracting = true
+        ElMessage.info(this.$t('requirementAnalysis.extractingContent'))
+
+        // 上传文档
         const formData = new FormData()
         formData.append('title', this.documentTitle)
         formData.append('file', this.selectedFile)
@@ -688,35 +789,284 @@ export default {
           formData.append('project', this.selectedProject)
         }
 
-        ElMessage.info(this.$t('requirementAnalysis.extractingContent'))
         const uploadResponse = await api.post('/requirement-analysis/documents/', formData, {
           headers: {
             'Content-Type': 'multipart/form-data',
           },
         })
 
-        // 提取文档内容
-        const extractResponse = await api.get(`/requirement-analysis/documents/${uploadResponse.data.id}/extract_text/`)
-        const extractedText = extractResponse.data.extracted_text
+        this.currentDocumentId = uploadResponse.data.id
 
-        if (!extractedText || extractedText.trim().length === 0) {
+        // 提取文档内容
+        const extractResponse = await api.get(`/requirement-analysis/documents/${this.currentDocumentId}/extract_text/`)
+        this.currentDocumentText = extractResponse.data.extracted_text
+
+        if (!this.currentDocumentText || this.currentDocumentText.trim().length === 0) {
           ElMessage.error(this.$t('requirementAnalysis.extractionFailed'))
+          this.isExtracting = false
           return
         }
 
-        const requirementText = `${this.$t('requirementAnalysis.documentTitle')}: ${this.documentTitle}\n\n${this.$t('requirementAnalysis.documentContent')}:\n${extractedText}`
+        this.isExtracting = false
+        this.showChatPanel = true
 
-        await this.startGeneration(
-          this.documentTitle,
-          requirementText,
-          this.selectedProject,
-          this.globalOutputMode  // 使用全局输出模式
-        )
+        // 生成默认的快捷提示
+        this.generateChatSuggestions()
+
+        ElMessage.success(this.$t('requirementAnalysis.readyToChat'))
 
       } catch (error) {
-        console.error(this.$t('requirementAnalysis.documentProcessingFailed'), error)
+        console.error('Document processing failed:', error)
+        this.isExtracting = false
         ElMessage.error(this.$t('requirementAnalysis.documentProcessingFailed') + ': ' + (error.response?.data?.error || error.message))
       }
+    },
+
+    generateChatSuggestions() {
+      // 生成默认的快捷提示，帮助用户快速开始
+      this.chatSuggestions = [
+        this.$t('requirementAnalysis.suggestionAllFeatures'),
+        this.$t('requirementAnalysis.suggestionMainFlow'),
+        this.$t('requirementAnalysis.suggestionPerformance'),
+        this.$t('requirementAnalysis.suggestionBoundary')
+      ]
+    },
+
+    sendSuggestion(suggestion) {
+      this.chatInput = suggestion
+      this.sendChatMessage()
+    },
+
+    async sendChatMessage() {
+      const message = this.chatInput.trim()
+      if (!message || this.isChatLoading) return
+
+      // 添加用户消息
+      this.chatHistory.push({
+        role: 'user',
+        content: message
+      })
+      this.chatInput = ''
+      this.isChatLoading = true
+
+      // 创建AI回复占位
+      const aiMsgIndex = this.chatHistory.length
+      this.chatHistory.push({
+        role: 'ai',
+        content: '',
+        isStreaming: true
+      })
+
+      try {
+        // 滚动到底部
+        this.$nextTick(() => {
+          this.scrollChatToBottom()
+        })
+
+        // 使用 EventSource 进行 SSE 流式通信
+        const currentOrigin = window.location.origin
+        const chatUrl = `${currentOrigin}/api/requirement-analysis/documents/${this.currentDocumentId}/chat/`
+
+        // 使用 fetch + ReadableStream 来支持 POST 请求的 SSE
+        const response = await fetch(chatUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': this.getCsrfToken()
+          },
+          body: JSON.stringify({ message: message }),
+          credentials: 'include'
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.error || `HTTP ${response.status}`)
+        }
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                if (data.type === 'content') {
+                  this.chatHistory[aiMsgIndex].content = data.content
+                  this.chatHistory[aiMsgIndex].isStreaming = false
+                } else if (data.type === 'error') {
+                  this.chatHistory[aiMsgIndex].content = `❌ ${this.$t('requirementAnalysis.chatError')}: ${data.message}`
+                  this.chatHistory[aiMsgIndex].isStreaming = false
+                }
+              } catch (e) {
+                // 忽略解析错误
+              }
+            }
+          }
+        }
+
+        this.isChatLoading = false
+        this.$nextTick(() => {
+          this.scrollChatToBottom()
+        })
+        // 每条对话完成后保存，确保记录不丢失
+        this.persistChatSession()
+
+      } catch (error) {
+        console.error('Chat error:', error)
+        this.chatHistory[aiMsgIndex].content = `❌ ${this.$t('requirementAnalysis.chatError')}: ${error.message}`
+        this.chatHistory[aiMsgIndex].isStreaming = false
+        this.isChatLoading = false
+        this.persistChatSession()
+      }
+    },
+
+    getCsrfToken() {
+      const cookieValue = document.cookie
+        .split('; ')
+        .find(row => row.startsWith('csrftoken='))
+      return cookieValue ? cookieValue.split('=')[1] : ''
+    },
+
+    scrollChatToBottom() {
+      const container = this.$refs.chatMessages
+      if (container) {
+        container.scrollTop = container.scrollHeight
+      }
+    },
+
+    async downloadChatTestCase(msg) {
+      try {
+        const content = msg.content
+        if (!content) return
+
+        const workbook = XLSX.utils.book_new()
+        const filteredContent = this.filterTestCasesOnly(content)
+        const tableFormat = this.parseTableFormat(filteredContent)
+
+        let worksheetData = []
+        if (tableFormat.length > 0) {
+          worksheetData = tableFormat.map(row =>
+            row.map(cell => this.convertBrToNewline(cell))
+          )
+        } else {
+          worksheetData = this.parseStructuredFormat(filteredContent)
+        }
+
+        const worksheet = XLSX.utils.aoa_to_sheet(worksheetData)
+        const colWidths = [
+          { wch: 15 }, { wch: 30 }, { wch: 25 }, { wch: 40 }, { wch: 30 }, { wch: 10 }
+        ]
+        worksheet['!cols'] = colWidths
+        XLSX.utils.book_append_sheet(workbook, worksheet, this.$t('requirementAnalysis.testCaseSheetName'))
+
+        const fileName = `testcases_${new Date().toISOString().slice(0, 10)}.xlsx`
+        XLSX.writeFile(workbook, fileName)
+        ElMessage.success(this.$t('requirementAnalysis.downloadSuccess'))
+      } catch (error) {
+        console.error('Download failed:', error)
+        ElMessage.error(this.$t('requirementAnalysis.downloadFailed'))
+      }
+    },
+
+    async saveChatTestCase(msg) {
+      const content = (msg.content || '').trim()
+      if (!content) {
+        ElMessage.warning(this.$t('requirementAnalysis.saveFailed'))
+        return
+      }
+      try {
+        // 将对话生成的用例内容保存到AI生成用例记录（需人工审核采纳后才进入测试用例）
+        const response = await api.post('/requirement-analysis/testcase-generation/save-from-content/', {
+          content: content,
+          project_id: this.selectedProject || undefined,
+          title: this.documentTitle ? `AI对话生成 - ${this.documentTitle}` : undefined
+        })
+        if (response.data.already_saved) {
+          ElMessage.info(this.$t('requirementAnalysis.alreadySaved'))
+        } else {
+          ElMessage.success(this.$t('requirementAnalysis.savedToRecords'))
+        }
+      } catch (error) {
+        console.error(this.$t('requirementAnalysis.saveFailed'), error)
+        ElMessage.error(this.$t('requirementAnalysis.saveFailed') + ': ' + (error.response?.data?.error || error.message))
+      }
+    },
+
+    closeChatPanel() {
+      this.showChatPanel = false
+      this.chatHistory = []
+      this.chatInput = ''
+      this.currentDocumentId = null
+      this.currentDocumentText = ''
+      this.selectedFile = null
+      this.documentTitle = ''
+      this.$refs.fileInput.value = ''
+      // 返回上传 = 重新开始，清除已保存的对话记录
+      this.clearStoredChatSession()
+    },
+
+    // ---- 对话记录持久化（切换页面后回来仍保留记录） ----
+
+    getChatStorageKey() {
+      return 'testhub_req_chat_session'
+    },
+
+    persistChatSession() {
+      try {
+        const data = {
+          documentId: this.currentDocumentId,
+          documentTitle: this.documentTitle,
+          chatHistory: this.chatHistory,
+          // 仅当文档已就绪且面板可见时才自动恢复
+          resume: !!(this.currentDocumentId && this.chatHistory && this.chatHistory.length > 0)
+        }
+        localStorage.setItem(this.getChatStorageKey(), JSON.stringify(data))
+      } catch (e) {
+        console.warn('保存对话记录失败:', e)
+      }
+    },
+
+    clearStoredChatSession() {
+      try {
+        localStorage.removeItem(this.getChatStorageKey())
+      } catch (e) {
+        // ignore
+      }
+    },
+
+    restoreChatSession() {
+      try {
+        const raw = localStorage.getItem(this.getChatStorageKey())
+        if (!raw) return
+        const data = JSON.parse(raw)
+        if (!data || !data.documentId) return
+        this.currentDocumentId = data.documentId
+        this.documentTitle = data.documentTitle || ''
+        this.chatHistory = Array.isArray(data.chatHistory) ? data.chatHistory : []
+        // 有文档且有记录时，自动重新打开对话面板
+        this.showChatPanel = !!(data.chatHistory && data.chatHistory.length > 0)
+        if (this.showChatPanel) {
+          this.$nextTick(() => this.scrollChatToBottom())
+        }
+      } catch (e) {
+        console.warn('恢复对话记录失败:', e)
+      }
+    },
+
+    clearChatRecords() {
+      this.chatHistory = []
+      this.chatInput = ''
+      this.clearStoredChatSession()
+      ElMessage.success(this.$t('requirementAnalysis.clearRecords'))
     },
 
     async startGeneration(title, requirementText, projectId, outputMode = 'stream') {
@@ -1160,8 +1510,7 @@ export default {
         if (response.data.already_saved) {
           ElMessage.info(this.$t('requirementAnalysis.alreadySaved'))
         } else {
-          const importedCount = response.data.imported_count || 0
-          ElMessage.success(`测试用例已保存！已导入 ${importedCount} 条测试用例到测试用例管理系统`)
+          ElMessage.success(this.$t('requirementAnalysis.savedToRecords'))
         }
 
         // 不跳转，留在当前页面
@@ -1476,7 +1825,7 @@ export default {
 <style scoped>
 .requirement-analysis {
   padding: 20px;
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   position: relative;
 }
@@ -1776,13 +2125,58 @@ export default {
 }
 
 
+/* 输入区域：手动输入 + 文档上传 左右分栏 */
+.input-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: stretch;
+  margin-bottom: 30px;
+}
+
+.manual-input-section, .upload-section {
+  display: flex;
+  min-width: 0;
+}
+
 .manual-input-card, .upload-card {
   background: white;
   border-radius: 12px;
   padding: 30px;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
   border: 1px solid #e1e8ed;
-  margin-bottom: 30px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.manual-input-card .input-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.manual-input-card .form-group:has(.form-textarea) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.manual-input-card .form-textarea {
+  flex: 1;
+  min-height: 140px;
+  resize: vertical;
+}
+
+.manual-input-card .generate-manual-btn {
+  margin-top: auto;
+}
+
+/* 窄屏时回退为上下排列 */
+@media (max-width: 1024px) {
+  .input-panels {
+    grid-template-columns: 1fr;
+  }
 }
 
 .manual-input-card h2, .upload-card h2 {
@@ -1919,29 +2313,6 @@ export default {
 .generate-manual-btn:disabled, .generate-btn:disabled {
   background: #bdc3c7;
   cursor: not-allowed;
-}
-
-.divider {
-  text-align: center;
-  margin: 40px 0;
-  position: relative;
-}
-
-.divider::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: #ddd;
-}
-
-.divider span {
-  background: white;
-  padding: 0 20px;
-  color: #666;
-  font-size: 1rem;
 }
 
 .upload-area {
@@ -2458,6 +2829,303 @@ export default {
     max-width: 300px;
     justify-content: center;
   }
+}
+
+/* === AI 对话面板样式 === */
+.chat-panel-section {
+  margin: 20px 0;
+}
+
+.chat-panel-card {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  border: 1px solid #e1e8ed;
+  overflow: hidden;
+}
+
+.chat-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.chat-header h2 {
+  margin: 0;
+  font-size: 1.3rem;
+  flex: 1;
+}
+
+.chat-subtitle {
+  font-size: 0.85rem;
+  opacity: 0.85;
+  margin: 0;
+  width: 100%;
+}
+
+.close-chat-btn {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+
+.close-chat-btn:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.clear-chat-btn {
+  background: rgba(245, 108, 108, 0.25);
+  color: white;
+  border: 1px solid rgba(245, 108, 108, 0.4);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+
+.clear-chat-btn:hover {
+  background: rgba(245, 108, 108, 0.5);
+}
+
+.chat-messages {
+  max-height: 500px;
+  overflow-y: auto;
+  padding: 20px 24px;
+  background: #f8f9fa;
+}
+
+.chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+.chat-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: #666;
+}
+
+.chat-empty-icon {
+  font-size: 3rem;
+  margin-bottom: 12px;
+}
+
+.chat-suggestions {
+  margin-top: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.suggestion-label {
+  width: 100%;
+  font-size: 0.85rem;
+  color: #999;
+  margin-bottom: 4px;
+}
+
+.suggestion-btn {
+  background: #e8ecf1;
+  border: 1px solid #d1d5db;
+  border-radius: 20px;
+  padding: 8px 18px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: #374151;
+  transition: all 0.2s;
+}
+
+.suggestion-btn:hover {
+  background: #d1d5db;
+  border-color: #9ca3af;
+}
+
+.chat-message {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message.user {
+  flex-direction: row-reverse;
+}
+
+.message-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #e9ecef;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+.chat-message.user .message-avatar {
+  background: #667eea;
+  color: white;
+}
+
+.message-content {
+  max-width: 75%;
+}
+
+.chat-message.user .message-content {
+  text-align: right;
+}
+
+.message-role {
+  font-size: 0.8rem;
+  color: #999;
+  margin-bottom: 4px;
+}
+
+.message-text {
+  background: white;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid #e1e8ed;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #2c3e50;
+  word-break: break-word;
+}
+
+.chat-message.user .message-text {
+  background: #667eea;
+  color: white;
+  border: none;
+}
+
+.message-text.streaming {
+  border-color: #667eea;
+  border-left: 3px solid #667eea;
+}
+
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+  color: #667eea;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.message-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.msg-action-btn {
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.msg-action-btn:hover {
+  background: #e0e0e0;
+}
+
+/* 打字指示器 */
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #999;
+  animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) { animation-delay: 0s; }
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.chat-input-area {
+  display: flex;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid #e1e8ed;
+  background: white;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  resize: none;
+  font-family: inherit;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15);
+}
+
+.chat-send-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 10px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: opacity 0.2s;
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-hint {
+  padding: 0 24px 12px 24px;
+  font-size: 0.8rem;
+  color: #999;
+  text-align: center;
 }
 </style>
 

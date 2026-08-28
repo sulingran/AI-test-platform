@@ -293,10 +293,10 @@ class TestExecutor:
                     elif self.browser == 'safari':
                         browser = p.webkit.launch(headless=self.headless, args=common_args)
                     else:  # chrome or edge
-                        # 添加防检测参数
+                        # 添加防检测参数；优先驱动本机安装的 Chrome（见 local_browser）
+                        from apps.ui_automation.local_browser import chrome_launch_kwargs
                         browser = p.chromium.launch(
-                            headless=self.headless,
-                            args=common_args
+                            **chrome_launch_kwargs(dict(headless=self.headless, args=common_args))
                         )
 
                     print(f"✓ 浏览器已启动")
@@ -1658,7 +1658,12 @@ class TestExecutor:
             options.add_argument('--disable-device-discovery-notifications')
 
             # 使用缓存优先策略
-            service = ChromeService(ChromeDriverManager().install())
+            # 优先使用项目内置 ChromeDriver（内网无法在线下载）
+            from apps.ui_automation.local_browser import get_chromedriver_path
+            driver_path = get_chromedriver_path()
+            if not driver_path:
+                raise Exception("未找到 ChromeDriver，请将 chromedriver.exe 放入项目 webdrivers 目录")
+            service = ChromeService(driver_path)
             driver = webdriver.Chrome(service=service, options=options)
         elif self.browser == 'firefox':
             options = FirefoxOptions()
@@ -1748,7 +1753,12 @@ class TestExecutor:
             options.add_argument('--disable-infobars')  # 禁用信息栏
 
             # 使用缓存优先策略
-            service = ChromeService(ChromeDriverManager().install())
+            # 优先使用项目内置 ChromeDriver（内网无法在线下载）
+            from apps.ui_automation.local_browser import get_chromedriver_path
+            driver_path = get_chromedriver_path()
+            if not driver_path:
+                raise Exception("未找到 ChromeDriver，请将 chromedriver.exe 放入项目 webdrivers 目录")
+            service = ChromeService(driver_path)
             driver = webdriver.Chrome(service=service, options=options)
 
         return driver

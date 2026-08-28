@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, TimeoutError as PlaywrightTimeout
 import logging
 from .variable_resolver import resolve_variables
+from .local_browser import chrome_launch_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,10 @@ class PlaywrightTestEngine:
         try:
             playwright = sync_playwright().start()
             browser_launcher = getattr(playwright, normalized_browser)
-            browser = browser_launcher.launch(headless=True)
+            launch_kwargs = {'headless': True}
+            if normalized_browser == 'chromium':
+                launch_kwargs = chrome_launch_kwargs(launch_kwargs)
+            browser = browser_launcher.launch(**launch_kwargs)
             return True, None
         except Exception as e:
             logger.error(f"同步检查 Playwright 执行环境失败: {str(e)}")
@@ -116,7 +120,10 @@ class PlaywrightTestEngine:
         try:
             playwright = await async_playwright().start()
             browser_launcher = getattr(playwright, normalized_browser)
-            browser = await browser_launcher.launch(headless=True)
+            launch_kwargs = {'headless': True}
+            if normalized_browser == 'chromium':
+                launch_kwargs = chrome_launch_kwargs(launch_kwargs)
+            browser = await browser_launcher.launch(**launch_kwargs)
             return True, None
         except Exception as e:
             logger.error(f"异步检查 Playwright 执行环境失败: {str(e)}")
@@ -145,16 +152,19 @@ class PlaywrightTestEngine:
             else:
                 browser_launcher = self.playwright.chromium
 
-            # 启动浏览器
-            self.browser = await browser_launcher.launch(
-                headless=self.headless,
-                args=[
+            # 启动浏览器（chromium 优先使用本机安装的 Chrome，见 local_browser）
+            launch_kwargs = {
+                'headless': self.headless,
+                'args': [
                     '--disable-blink-features=AutomationControlled',  # 避免被检测
                     '--ignore-certificate-errors',  # 忽略证书错误
                     '--allow-insecure-localhost',  # 允许不安全localhost
                     '--disable-web-security',  # 禁用web安全限制（跨域）
                 ]
-            )
+            }
+            if normalized_browser == 'chromium':
+                launch_kwargs = chrome_launch_kwargs(launch_kwargs)
+            self.browser = await browser_launcher.launch(**launch_kwargs)
 
             # 创建浏览器上下文
             self.context = await self.browser.new_context(

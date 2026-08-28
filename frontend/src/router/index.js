@@ -437,6 +437,7 @@ const routes = [
             }
         ]
     }
+    // APP自动化测试模块已下线（无 APP 业务），路由已移除
 ]
 
 const router = createRouter({

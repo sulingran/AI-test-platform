@@ -196,7 +196,8 @@ export default {
     roles: {
       writer: 'Test Case Writer',
       reviewer: 'Test Reviewer',
-      browser_use_text: 'Browser UI Testing'
+      browser_use_text: 'Browser Use - Text Mode',
+      browser_use_vision: 'Browser Use - Vision Mode'
     },
     messages: {
       loadFailed: 'Failed to load configurations',

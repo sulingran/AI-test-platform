@@ -197,7 +197,6 @@ class EnvironmentConfigViewSet(viewsets.ViewSet):
 
 import requests
 from apps.requirement_analysis.models import AIModelConfig
-from apps.ui_automation.runtime_context import normalize_openai_base_url
 
 class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     """
@@ -405,7 +404,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                  status=status.HTTP_400_BAD_REQUEST
              )
 
-        base_url = normalize_openai_base_url(base_url)
+        base_url = base_url.rstrip('/')
 
         try:
             # 尝试调用 chat completions 接口 (OpenAI Compatible)
@@ -486,7 +485,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        base_url = normalize_openai_base_url(base_url)
+        base_url = base_url.rstrip('/')
 
         try:
             url = f"{base_url}/chat/completions"

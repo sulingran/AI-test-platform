@@ -45,8 +45,16 @@
         </el-table-column>
         <el-table-column prop="start_time" :label="$t('uiAutomation.ai.executionRecords.startTime')" width="180" :formatter="formatDate" />
         <el-table-column prop="executed_by.username" :label="$t('uiAutomation.ai.executionRecords.executor')" width="120" />
-        <el-table-column :label="$t('uiAutomation.common.operation')" width="200" fixed="right">
+        <el-table-column :label="$t('uiAutomation.common.operation')" width="260" fixed="right">
           <template #default="{ row }">
+            <el-button
+              v-if="row.status === 'running' || row.status === 'pending'"
+              size="small"
+              type="danger"
+              @click="handleStop(row)"
+            >
+              {{ $t('uiAutomation.ai.stopExecution') }}
+            </el-button>
             <el-button size="small" @click="viewDetail(row)">
               {{ $t('uiAutomation.ai.executionRecords.viewDetail') }}
             </el-button>
@@ -131,7 +139,7 @@ import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
-import { getAIExecutionRecords, batchDeleteAIExecutionRecords } from '@/api/ui_automation'
+import { getAIExecutionRecords, batchDeleteAIExecutionRecords, stopAITask } from '@/api/ui_automation'
 import AIExecutionReport from './AIExecutionReport.vue'
 
 const { t } = useI18n()
@@ -196,6 +204,18 @@ const viewDetail = (row) => {
 const viewReport = (row) => {
   reportRecordId.value = row.id
   showReportDialog.value = true
+}
+
+// 停止正在执行的任务
+const handleStop = async (row) => {
+  try {
+    await stopAITask(row.id)
+    ElMessage.warning(t('uiAutomation.ai.messages.stopping'))
+    // 不立即刷新状态，等待轮询检测到状态变化
+  } catch (error) {
+    console.error('停止失败:', error)
+    ElMessage.error(t('uiAutomation.ai.messages.stopFailed'))
+  }
 }
 
 // 从详情页打开报告

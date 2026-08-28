@@ -141,13 +141,34 @@ export default {
     // Save
     saveSuccess: 'Successfully saved {count} test cases',
     saveFailed: 'Save failed',
-    alreadySaved: 'Test cases already saved',
+    alreadySaved: 'These test cases are already saved to AI-generated records, please do not save again',
+    savedToRecords: 'Test cases saved to AI-generated records. Please review and adopt them from the records page',
 
     // Status
     pending: 'Pending',
     processing: 'Processing',
     completed: 'Completed',
-    failed: 'Failed'
+    failed: 'Failed',
+
+    // AI Chat Panel
+    aiChatTitle: 'AI Document Chat',
+    aiChatSubtitle: 'Upload successful! Tell me which features you want to generate test cases for',
+    chatWithAI: '💬 Chat with AI',
+    extracting: '📄 Extracting...',
+    readyToChat: 'Document extracted. Please enter your instructions below',
+    backToUpload: 'Back to Upload',
+    clearRecords: 'Clear Chat',
+    chatEmptyHint: 'Enter your instructions below to tell AI which features to generate test cases for',
+    chatSuggestions: 'Quick suggestions:',
+    suggestionAllFeatures: 'Generate test cases for all features in the document',
+    suggestionMainFlow: 'Generate main flow test cases for key features',
+    suggestionPerformance: 'Generate performance test cases for the features',
+    suggestionBoundary: 'Generate boundary value test cases for the features',
+    send: 'Send',
+    chatPlaceholder: 'Enter instructions, e.g.: Generate test cases for the login feature with main flow and 2 edge cases',
+    chatHint: 'Ctrl+Enter to send',
+    chatError: 'Chat error',
+    you: 'You'
   },
   generatedTestCases: {
     // Page
@@ -480,6 +501,16 @@ export default {
     timeoutSettingsLabel: '⏱️ Timeout Settings',
     reviewTimeoutLabel: 'Review & Improve Timeout (seconds)',
     timeoutHint: 'Total timeout for AI review and improvement (Recommended: 120s for small docs, 600-1800s for large docs, up to 3600s for very large docs)',
+
+    // Boundary Settings
+    boundarySettings: '📏 Case Count Boundaries',
+    maxFunctionalCases: 'Max Functional Cases Per Feature',
+    maxFunctionalHint: 'Upper limit of functional test cases per feature (includes 1 main flow)',
+    maxPerformanceCases: 'Max Performance Cases Per Feature',
+    maxPerformanceHint: 'Upper limit of performance test cases per feature (must include parameter boundaries)',
+    maxOtherCases: 'Max Other Cases Per Feature',
+    maxOtherHint: 'Upper limit of other types (security, compatibility, etc.) per feature',
+    casesPerFeature: 'cases/feature',
 
     // Buttons
     cancel: 'Cancel',

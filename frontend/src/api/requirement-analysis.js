@@ -147,3 +147,14 @@ export function deletePromptConfig(id) {
     method: 'delete'
   })
 }
+
+// ==================== 文档对话 ====================
+
+// 文档AI对话 - 发送消息并获取流式响应
+export function chatWithDocument(documentId, message) {
+  return request({
+    url: `/requirement-analysis/documents/${documentId}/chat/`,
+    method: 'post',
+    data: { message }
+  })
+}

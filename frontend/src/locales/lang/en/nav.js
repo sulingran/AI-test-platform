@@ -1,6 +1,7 @@
 export default {
   nav: {
     home: 'Home',
+    back: 'Back',
     logout: 'Logout',
     profile: 'Profile',
     language: 'Language'
@@ -50,6 +51,7 @@ export default {
     scriptList: 'Script List',
     suiteManagement: 'Suite Management',
     executionRecords: 'Execution Records',
+
 
     // AI Intelligent Mode
     aiIntelligentTesting: 'AI Intelligent Testing',

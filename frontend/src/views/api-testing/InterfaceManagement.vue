@@ -1212,7 +1212,12 @@ const loadRequests = async () => {
   if (!selectedProject.value) return
 
   try {
-    const response = await api.get('/api-testing/requests/')
+    const response = await api.get('/api-testing/requests/', {
+      params: {
+        project: selectedProject.value,
+        page_size: 1000
+      }
+    })
     const requests = response.data.results || response.data || []
 
     // 清空所有集合的子节点（请求）

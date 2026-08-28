@@ -162,6 +162,8 @@
             </el-menu-item>
           </template>
 
+          <!-- APP自动化测试模块已下线（无 APP 业务），菜单已移除 -->
+
           <!-- AI 智能模式模块菜单 -->
           <template v-else-if="currentModule === 'ai-intelligent-mode'">
             <el-menu-item index="/ai-intelligent-mode/testing">
@@ -225,6 +227,10 @@
         <el-header height="60px">
           <div class="header-content">
             <div class="header-left">
+              <div class="back-nav" title="返回" @click="goBack">
+                <el-icon class="back-icon"><Back /></el-icon>
+                <span class="back-text">{{ $t('nav.back') }}</span>
+              </div>
               <el-breadcrumb separator="/">
                 <el-breadcrumb-item :to="{ path: '/home' }">{{ $t('nav.home') }}</el-breadcrumb-item>
                 <el-breadcrumb-item v-if="moduleName">{{ moduleName }}</el-breadcrumb-item>
@@ -288,10 +294,9 @@ import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
   DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Tickets, Plus
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Tickets, Plus, Back
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
-import logoHomePng from '@/assets/images/logo_home.png'
 
 const router = useRouter()
 const route = useRoute()
@@ -299,9 +304,7 @@ const userStore = useUserStore()
 const appStore = useAppStore()
 const { t } = useI18n()
 
-const logoImage = computed(() => {
-		return route.path === '/home' ? logoSvg : logoHomePng
-	})
+const logoImage = computed(() => logoSvg)
 	
 
 // 当前语言显示
@@ -410,6 +413,15 @@ const handleCommand = (command) => {
     router.push('/ai-generation/profile')
   }
 }
+
+// 返回：有历史则回退，否则回到首页
+const goBack = () => {
+  if (window.history.length > 1) {
+    router.back()
+  } else {
+    router.push('/home')
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -437,7 +449,9 @@ const handleCommand = (command) => {
 		.logo-img {
 			width: 100%;
 			height: 100%;
-			object-fit: fill;
+			object-fit: contain;
+			padding: 8px 16px;
+			box-sizing: border-box;
 		}
 	}
 
@@ -508,9 +522,33 @@ const handleCommand = (command) => {
   .header-left {
     flex: 1;
     overflow: hidden;
-    
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
+
     :deep(.el-breadcrumb) {
       font-size: 14px;
+      white-space: nowrap;
+    }
+  }
+
+  .back-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #606266;
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+
+    .back-icon {
+      font-size: 16px;
+    }
+
+    &:hover {
+      color: #1890ff;
     }
   }
 

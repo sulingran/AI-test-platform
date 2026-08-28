@@ -65,6 +65,22 @@
                 </div>
               </div>
 
+              <div class="detail-section">
+                <h4>{{ $t('generationConfig.boundarySettings') }}</h4>
+                <div class="detail-item">
+                  <label>{{ $t('generationConfig.maxFunctionalCases') }}</label>
+                  <span>{{ config.max_functional_cases_per_feature || 5 }} {{ $t('generationConfig.casesPerFeature') }}</span>
+                </div>
+                <div class="detail-item">
+                  <label>{{ $t('generationConfig.maxPerformanceCases') }}</label>
+                  <span>{{ config.max_performance_cases_per_feature || 3 }} {{ $t('generationConfig.casesPerFeature') }}</span>
+                </div>
+                <div class="detail-item">
+                  <label>{{ $t('generationConfig.maxOtherCases') }}</label>
+                  <span>{{ config.max_other_cases_per_feature || 3 }} {{ $t('generationConfig.casesPerFeature') }}</span>
+                </div>
+              </div>
+
               <div class="config-meta">
                 <div class="meta-item">
                   <label>{{ $t('generationConfig.createdAt') }}</label>
@@ -165,6 +181,40 @@
               </div>
             </div>
 
+            <div class="detail-section">
+              <h4>{{ $t('generationConfig.boundarySettings') }}</h4>
+              <div class="form-group">
+                <label>{{ $t('generationConfig.maxFunctionalCases') }}</label>
+                <input
+                  v-model.number="configForm.max_functional_cases_per_feature"
+                  type="number"
+                  class="form-input"
+                  min="1"
+                  max="20">
+                <div class="field-hint">{{ $t('generationConfig.maxFunctionalHint') }}</div>
+              </div>
+              <div class="form-group">
+                <label>{{ $t('generationConfig.maxPerformanceCases') }}</label>
+                <input
+                  v-model.number="configForm.max_performance_cases_per_feature"
+                  type="number"
+                  class="form-input"
+                  min="1"
+                  max="10">
+                <div class="field-hint">{{ $t('generationConfig.maxPerformanceHint') }}</div>
+              </div>
+              <div class="form-group">
+                <label>{{ $t('generationConfig.maxOtherCases') }}</label>
+                <input
+                  v-model.number="configForm.max_other_cases_per_feature"
+                  type="number"
+                  class="form-input"
+                  min="1"
+                  max="10">
+                <div class="field-hint">{{ $t('generationConfig.maxOtherHint') }}</div>
+              </div>
+            </div>
+
             <div class="modal-actions">
               <button type="button" class="cancel-btn" @click="closeModals">{{ $t('generationConfig.cancel') }}</button>
               <button
@@ -207,6 +257,9 @@ export default {
         default_output_mode: 'stream',
         enable_auto_review: true,
         review_timeout: 1500,
+        max_functional_cases_per_feature: 5,
+        max_performance_cases_per_feature: 3,
+        max_other_cases_per_feature: 3,
         is_active: true
       }
     }
@@ -259,6 +312,9 @@ export default {
         default_output_mode: 'stream',
         enable_auto_review: true,
         review_timeout: 1500,
+        max_functional_cases_per_feature: 5,
+        max_performance_cases_per_feature: 3,
+        max_other_cases_per_feature: 3,
         is_active: true
       }
     },
@@ -271,6 +327,9 @@ export default {
         default_output_mode: config.default_output_mode,
         enable_auto_review: config.enable_auto_review,
         review_timeout: config.review_timeout,
+        max_functional_cases_per_feature: config.max_functional_cases_per_feature || 5,
+        max_performance_cases_per_feature: config.max_performance_cases_per_feature || 3,
+        max_other_cases_per_feature: config.max_other_cases_per_feature || 3,
         is_active: config.is_active
       }
       this.showEditModal = true

@@ -123,6 +123,13 @@ class SeleniumTestEngine:
                 # Safari 使用系统自带 safaridriver，无需额外下载驱动
                 return True, None
 
+            if browser_type == 'chrome':
+                # 项目内置 ChromeDriver 直接可用（内网无法在线下载）
+                import os as _os
+                from apps.ui_automation.local_browser import LOCAL_CHROMEDRIVER
+                if _os.path.exists(LOCAL_CHROMEDRIVER):
+                    return True, None
+
             manager_map = {
                 'chrome': ('Chrome', __import__('webdriver_manager.chrome', fromlist=['ChromeDriverManager']).ChromeDriverManager),
                 'firefox': ('Firefox', __import__('webdriver_manager.firefox', fromlist=['GeckoDriverManager']).GeckoDriverManager),
@@ -228,7 +235,12 @@ class SeleniumTestEngine:
                 options.add_argument('--disable-notifications')  # 禁用所有通知
 
                 # 使用缓存优先策略
-                service = Service(ChromeDriverManager().install())
+                # 优先使用项目内置 ChromeDriver（内网无法在线下载）
+                from apps.ui_automation.local_browser import get_chromedriver_path
+                driver_path = get_chromedriver_path()
+                if not driver_path:
+                    raise Exception("未找到 ChromeDriver，请将 chromedriver.exe 放入项目 webdrivers 目录")
+                service = Service(driver_path)
                 self.driver = webdriver.Chrome(service=service, options=options)
 
             elif self.browser_type == 'firefox':
@@ -331,7 +343,12 @@ class SeleniumTestEngine:
                 options.add_argument('--disable-features=TranslateUI')  # 禁用翻译提示
                 options.add_argument('--disable-infobars')  # 禁用信息栏
 
-                service = Service(ChromeDriverManager().install())
+                # 优先使用项目内置 ChromeDriver（内网无法在线下载）
+                from apps.ui_automation.local_browser import get_chromedriver_path
+                driver_path = get_chromedriver_path()
+                if not driver_path:
+                    raise Exception("未找到 ChromeDriver，请将 chromedriver.exe 放入项目 webdrivers 目录")
+                service = Service(driver_path)
                 self.driver = webdriver.Chrome(service=service, options=options)
 
             # 设置隐式等待

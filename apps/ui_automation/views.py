@@ -43,14 +43,6 @@ from .serializers import (
     AICaseSerializer, AIExecutionRecordSerializer
 )
 from .operation_logger import log_operation
-from .runtime_context import (
-    LOGIN_PASSWORD_PLACEHOLDER,
-    LOGIN_USERNAME_PLACEHOLDER,
-    build_runtime_task_description,
-    get_allowed_domains,
-    redact_sensitive_data,
-    validate_http_url,
-)
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -3076,36 +3068,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.status = 'stopped'
                     execution_record.logs += "\n[System] 任务已由用户停止。"
                 else:
-                    # 根据执行过程判断最终状态（任务或步骤出现失败则标记失败）
-                    failed = False
-                    if execution_record.planned_tasks:
-                        failed = any(t.get('status') in ('failed', 'error') for t in execution_record.planned_tasks)
-                    # history 也可能包含状态信息
-                    if not failed and history:
-                        try:
-                            steps = history.steps if hasattr(history, 'steps') else []
-                            for step in steps:
-                                if getattr(step, 'status', None) == 'failed':
-                                    failed = True
-                                    break
-                        except Exception:
-                            pass
-
-                    if failed:
-                        execution_record.status = 'failed'
-                        execution_record.logs += "\n执行完成，但检测到失败步骤或任务。"
-                    else:
-                        execution_record.status = 'passed'
-                        execution_record.logs += "\n执行完成。"
-
-                    # 记录任务完成统计信息
-                    if execution_record.planned_tasks:
-                        total_tasks = len(execution_record.planned_tasks)
-                        completed_tasks = len(
-                            [t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
-                        pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
-                        logger.info(
-                            f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
+                    execution_record.logs += "\n执行完成。"
 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
@@ -3118,13 +3081,29 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
                 execution_record.steps_completed = steps
 
-                # 自动标记已完成的任务
+                # 后处理：清理未标记的子任务 (pending → skipped)
                 if execution_record.planned_tasks:
                     self._auto_mark_completed_tasks(execution_record)
                     execution_record.logs = append_execution_summary(
                         execution_record.logs,
                         summarize_planned_tasks(execution_record.planned_tasks)
                     )
+
+                # 最终状态判定（在 task 清理之后，确保状态准确）
+                if not should_stop() and execution_record.planned_tasks:
+                    status, summary = resolve_execution_status(execution_record.planned_tasks)
+                    execution_record.status = status
+                    if status == 'failed':
+                        if summary.get('failed', 0) > 0:
+                            execution_record.logs += "\n执行完成，但检测到失败步骤或任务。"
+                        elif summary.get('pending', 0) > 0 or summary.get('in_progress', 0) > 0:
+                            execution_record.logs += "\n执行完成，但有步骤未完成（待处理）。"
+
+                    total_tasks = len(execution_record.planned_tasks)
+                    completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                    pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+                    logger.info(
+                        f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
 
                 # 处理GIF录制文件
                 self._process_gif_recording(execution_record, history)
@@ -3143,6 +3122,11 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.logs += f"\n执行出错: {error_message}"
                 if failed_task_id is not None:
                     execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
+
+                # 后处理：将剩余 pending/in_progress 任务标记为 skipped
+                if execution_record.planned_tasks:
+                    self._auto_mark_completed_tasks(execution_record)
+
                 execution_record.logs = append_execution_summary(
                     execution_record.logs,
                     summarize_planned_tasks(execution_record.planned_tasks)
@@ -3211,33 +3195,47 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
     def _auto_mark_completed_tasks(self, execution_record):
         """
-        自动标记已完成的任务
-        通过分析执行历史和当前任务状态，自动标记那些已经执行但未被标记完成的任务
-        
-        注意：已移除统一标记逻辑，任务状态完全由AI智能体通过mark_task_complete控制
-        - 执行成功时标记为completed
-        - 执行失败时标记为failed
-        - 跳过执行时标记为skipped
-        - 未执行时标记为pending
+        后处理：处理执行结束后仍未标记的子任务。
+
+        执行过程中任务状态主要由 AI 智能体通过 mark_task_complete 控制，
+        但在以下场景 AI 可能不会标记所有任务：
+        - 达到 max_steps 上限提前终止
+        - Agent 调用 done() 提前结束
+        - Agent 运行过程中崩溃
+
+        本方法将执行结束后仍然 pending/in_progress 的子任务标记为 skipped，
+        表明这些步骤未被实际执行。
         """
         try:
-            # 记录初始状态
-            initial_completed = 0
-            initial_pending = 0
-            initial_failed = 0
-            initial_skipped = 0
-            
-            if execution_record.planned_tasks:
-                initial_completed = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
-                initial_pending = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
-                initial_failed = len([t for t in execution_record.planned_tasks if t.get('status') == 'failed'])
-                initial_skipped = len([t for t in execution_record.planned_tasks if t.get('status') == 'skipped'])
-                
-                logger.info(f"📊 Task status summary: {initial_completed} completed, {initial_pending} pending, {initial_failed} failed, {initial_skipped} skipped")
-            
-            # 不再自动标记所有任务为完成
-            # 任务状态完全由AI智能体通过mark_task_complete来控制
-            logger.info("📋 Task statuses are controlled by AI agent via mark_task_complete action")
+            if not execution_record.planned_tasks:
+                return
+
+            # 统计初始状态
+            initial_completed = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+            initial_pending = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+            initial_failed = len([t for t in execution_record.planned_tasks if t.get('status') == 'failed'])
+            initial_skipped = len([t for t in execution_record.planned_tasks if t.get('status') == 'skipped'])
+            initial_in_progress = len([t for t in execution_record.planned_tasks if t.get('status') == 'in_progress'])
+
+            logger.info(f"📊 Post-execution task status: {initial_completed} completed, {initial_pending} pending, "
+                        f"{initial_failed} failed, {initial_skipped} skipped, {initial_in_progress} in_progress")
+
+            # 如果执行被手动停止，不自动标记 — 保留原始状态让用户决定
+            if execution_record.status == 'stopped':
+                logger.info("⏸️ Execution was stopped by user, skipping auto-mark of pending tasks")
+                return
+
+            # 将未完成的 pending 和 in_progress 任务标记为 skipped
+            skipped_count = 0
+            for task in execution_record.planned_tasks:
+                status = task.get('status', 'pending')
+                if status in ('pending', 'in_progress'):
+                    task['status'] = 'skipped'
+                    skipped_count += 1
+
+            if skipped_count > 0:
+                logger.info(f"📌 Auto-marked {skipped_count} unprocessed tasks as 'skipped'")
+                execution_record.logs += f"\n[System] {skipped_count} 个未执行的步骤已自动标记为'已跳过'。"
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to summarize task statuses: {e}")
@@ -3455,77 +3453,26 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
     def run_adhoc(self, request):
         """执行临时 AI 任务"""
         project_id = request.data.get('project_id')
-        task_description = str(request.data.get('task_description') or '').strip()
+        task_description = request.data.get('task_description')
         execution_mode = request.data.get('execution_mode', 'text')  # 默认文本模式
         enable_gif = request.data.get('enable_gif', True)  # GIF录制开关，默认开启
 
         if not task_description:
             return Response({'error': '缺少任务描述参数'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 获取当前用户有权访问的项目（如果提供了project_id）
+        # 获取项目对象（如果提供了project_id）
         project = None
         if project_id:
-            project = UiProject.objects.filter(
-                models.Q(owner=request.user) | models.Q(members=request.user),
-                id=project_id,
-            ).distinct().first()
-            if project is None:
+            try:
+                project = UiProject.objects.get(id=project_id)
+            except UiProject.DoesNotExist:
                 return Response({'error': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
-
-        login_username = str(request.data.get('login_username') or '').strip()
-        login_password = str(request.data.get('login_password') or '')
-        if bool(login_username) != bool(login_password):
-            return Response(
-                {'error': '登录账号和密码必须同时填写'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            target_url = validate_http_url(
-                request.data.get('target_url') or (project.base_url if project else ''),
-                '目标地址',
-            )
-            login_url = validate_http_url(
-                request.data.get('login_url') or target_url,
-                '登录地址',
-            )
-        except ValueError as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if login_username and not login_url:
-            return Response(
-                {'error': '填写登录账号和密码时必须提供登录地址或目标地址'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        sensitive_values = tuple(
-            value for value in (login_username, login_password) if value
-        )
-        safe_task_description = redact_sensitive_data(
-            task_description,
-            sensitive_values,
-        )
-        sensitive_data = {}
-        allowed_domains = []
-        if login_username and login_password:
-            sensitive_data = {
-                LOGIN_USERNAME_PLACEHOLDER: login_username,
-                LOGIN_PASSWORD_PLACEHOLDER: login_password,
-            }
-            allowed_domains = get_allowed_domains(target_url, login_url)
-        runtime_task_description = build_runtime_task_description(
-            safe_task_description,
-            target_url=target_url,
-            login_url=login_url,
-            login_username=login_username,
-            login_password=login_password,
-        )
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
             project=project,
             case_name="Adhoc Task",
-            task_description=safe_task_description,
+            task_description=task_description,
             execution_mode=execution_mode,
             status='running',
             executed_by=request.user,
@@ -3599,16 +3546,12 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     return execution_record.status == 'stopped'
 
                 async def on_analysis_complete(planned_tasks):
-                    execution_record.planned_tasks = redact_sensitive_data(
-                        planned_tasks,
-                        sensitive_values,
-                    )
+                    execution_record.planned_tasks = planned_tasks
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
 
                 async def on_step_update(step_info):
                     try:
-                        step_info = redact_sensitive_data(step_info, sensitive_values)
                         # 处理日志
                         if step_info.get('type') == 'log':
                             content = step_info.get('content')
@@ -3662,16 +3605,13 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                         logger.error(f"更新步骤状态失败: {e}", exc_info=True)
 
                 history = run_full_process_sync(
-                    runtime_task_description,
+                    task_description,
                     analysis_callback=on_analysis_complete,
                     step_callback=on_step_update,
                     should_stop=should_stop_async,  # 传递异步版本
                     execution_mode=execution_mode,
                     enable_gif=enable_gif,  # 传递GIF录制开关
-                    case_name=safe_task_description[:50] if safe_task_description else "Adhoc Task",  # 传递用例名称用于GIF文件命名
-                    sensitive_values=sensitive_values,
-                    sensitive_data=sensitive_data,
-                    allowed_domains=allowed_domains,
+                    case_name=task_description[:50] if task_description else "Adhoc Task"  # 传递用例名称用于GIF文件命名
                 )
 
                 # 检查是否是手动停止 (使用同步版本)
@@ -3679,35 +3619,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     execution_record.status = 'stopped'
                     execution_record.logs += "\n[System] 任务已由用户停止。"
                 else:
-                    # 根据执行结果判定失败
-                    failed = False
-                    if execution_record.planned_tasks:
-                        failed = any(t.get('status') in ('failed', 'error') for t in execution_record.planned_tasks)
-                    if not failed and history:
-                        try:
-                            steps = history.steps if hasattr(history, 'steps') else []
-                            for step in steps:
-                                if getattr(step, 'status', None) == 'failed':
-                                    failed = True
-                                    break
-                        except Exception:
-                            pass
-
-                    if failed:
-                        execution_record.status = 'failed'
-                        execution_record.logs += "\n执行完成，但检测到失败步骤或任务。"
-                    else:
-                        execution_record.status = 'passed'
-                        execution_record.logs += "\n执行完成。"
-
-                    # 记录任务完成统计信息
-                    if execution_record.planned_tasks:
-                        total_tasks = len(execution_record.planned_tasks)
-                        completed_tasks = len(
-                            [t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
-                        pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
-                        logger.info(
-                            f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
+                    execution_record.logs += "\n执行完成。"
 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
@@ -3718,12 +3630,9 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     if hasattr(history, 'steps'):
                         steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
 
-                execution_record.steps_completed = redact_sensitive_data(
-                    steps,
-                    sensitive_values,
-                )
+                execution_record.steps_completed = steps
 
-                # 自动标记已完成的任务
+                # 后处理：清理未标记的子任务 (pending → skipped)
                 if execution_record.planned_tasks:
                     self._auto_mark_completed_tasks(execution_record)
                     execution_record.logs = append_execution_summary(
@@ -3731,13 +3640,29 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                         summarize_planned_tasks(execution_record.planned_tasks)
                     )
 
+                # 最终状态判定（在 task 清理之后，确保状态准确）
+                if not should_stop_sync() and execution_record.planned_tasks:
+                    status, summary = resolve_execution_status(execution_record.planned_tasks)
+                    execution_record.status = status
+                    if status == 'failed':
+                        if summary.get('failed', 0) > 0:
+                            execution_record.logs += "\n执行完成，但检测到失败步骤或任务。"
+                        elif summary.get('pending', 0) > 0 or summary.get('in_progress', 0) > 0:
+                            execution_record.logs += "\n执行完成，但有步骤未完成（待处理）。"
+
+                    total_tasks = len(execution_record.planned_tasks)
+                    completed_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+                    pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+                    logger.info(
+                        f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
+
                 # 处理GIF录制文件
                 self._process_gif_recording(execution_record, history)
 
                 safe_save(execution_record)
 
             except Exception as e:
-                error_message = redact_sensitive_data(str(e), sensitive_values)
+                error_message = str(e)
                 failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
                 execution_record.status = 'failed'
                 execution_record.end_time = timezone.now()
@@ -3748,6 +3673,11 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     execution_record.logs += f"\n执行出错: {error_message}"
                 if failed_task_id is not None:
                     execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
+
+                # 后处理：将剩余 pending/in_progress 任务标记为 skipped
+                if execution_record.planned_tasks:
+                    self._auto_mark_completed_tasks(execution_record)
+
                 execution_record.logs = append_execution_summary(
                     execution_record.logs,
                     summarize_planned_tasks(execution_record.planned_tasks)
@@ -3838,33 +3768,47 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
     def _auto_mark_completed_tasks(self, execution_record):
         """
-        自动标记已完成的任务
-        通过分析执行历史和当前任务状态，自动标记那些已经执行但未被标记完成的任务
-        
-        注意：已移除统一标记逻辑，任务状态完全由AI智能体通过mark_task_complete控制
-        - 执行成功时标记为completed
-        - 执行失败时标记为failed
-        - 跳过执行时标记为skipped
-        - 未执行时标记为pending
+        后处理：处理执行结束后仍未标记的子任务。
+
+        执行过程中任务状态主要由 AI 智能体通过 mark_task_complete 控制，
+        但在以下场景 AI 可能不会标记所有任务：
+        - 达到 max_steps 上限提前终止
+        - Agent 调用 done() 提前结束
+        - Agent 运行过程中崩溃
+
+        本方法将执行结束后仍然 pending/in_progress 的子任务标记为 skipped，
+        表明这些步骤未被实际执行。
         """
         try:
-            # 记录初始状态
-            initial_completed = 0
-            initial_pending = 0
-            initial_failed = 0
-            initial_skipped = 0
-            
-            if execution_record.planned_tasks:
-                initial_completed = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
-                initial_pending = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
-                initial_failed = len([t for t in execution_record.planned_tasks if t.get('status') == 'failed'])
-                initial_skipped = len([t for t in execution_record.planned_tasks if t.get('status') == 'skipped'])
-                
-                logger.info(f"📊 Task status summary: {initial_completed} completed, {initial_pending} pending, {initial_failed} failed, {initial_skipped} skipped")
-            
-            # 不再自动标记所有任务为完成
-            # 任务状态完全由AI智能体通过mark_task_complete来控制
-            logger.info("📋 Task statuses are controlled by AI agent via mark_task_complete action")
+            if not execution_record.planned_tasks:
+                return
+
+            # 统计初始状态
+            initial_completed = len([t for t in execution_record.planned_tasks if t.get('status') == 'completed'])
+            initial_pending = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
+            initial_failed = len([t for t in execution_record.planned_tasks if t.get('status') == 'failed'])
+            initial_skipped = len([t for t in execution_record.planned_tasks if t.get('status') == 'skipped'])
+            initial_in_progress = len([t for t in execution_record.planned_tasks if t.get('status') == 'in_progress'])
+
+            logger.info(f"📊 Post-execution task status: {initial_completed} completed, {initial_pending} pending, "
+                        f"{initial_failed} failed, {initial_skipped} skipped, {initial_in_progress} in_progress")
+
+            # 如果执行被手动停止，不自动标记 — 保留原始状态让用户决定
+            if execution_record.status == 'stopped':
+                logger.info("⏸️ Execution was stopped by user, skipping auto-mark of pending tasks")
+                return
+
+            # 将未完成的 pending 和 in_progress 任务标记为 skipped
+            skipped_count = 0
+            for task in execution_record.planned_tasks:
+                status = task.get('status', 'pending')
+                if status in ('pending', 'in_progress'):
+                    task['status'] = 'skipped'
+                    skipped_count += 1
+
+            if skipped_count > 0:
+                logger.info(f"📌 Auto-marked {skipped_count} unprocessed tasks as 'skipped'")
+                execution_record.logs += f"\n[System] {skipped_count} 个未执行的步骤已自动标记为'已跳过'。"
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to summarize task statuses: {e}")

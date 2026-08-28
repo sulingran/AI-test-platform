@@ -6,39 +6,6 @@ import os
 
 # 禁用 browser-use 遥测
 os.environ['ANONYMIZED_TELEMETRY'] = 'false'
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RUNTIME_DIR = os.path.join(PROJECT_ROOT, '.browser-use')
-RUNTIME_TEMP_DIR = os.path.join(RUNTIME_DIR, 'tmp')
-os.makedirs(RUNTIME_TEMP_DIR, exist_ok=True)
-os.environ.setdefault('BROWSER_USE_CONFIG_DIR', RUNTIME_DIR)
-if not os.path.isdir(os.environ.get('TEMP', '')) or not os.access(os.environ['TEMP'], os.W_OK):
-    os.environ['TEMP'] = RUNTIME_TEMP_DIR
-    os.environ['TMP'] = RUNTIME_TEMP_DIR
-import tempfile
-tempfile.tempdir = RUNTIME_TEMP_DIR
-
-# browser-use currently hard-codes its default download directory to /tmp.
-# On Windows that resolves to C:\\tmp, which is often not writable. Patch the
-# validator function before importing modules that create the default profile.
-try:
-    import browser_use.browser.profile as _browser_profile_module
-    from browser_use.browser.profile import BrowserProfile as _BrowserProfile
-
-    _browser_profile_module.TESTHUB_DOWNLOADS_DIR = os.path.join(RUNTIME_DIR, 'downloads')
-
-    def _set_testhub_downloads_path(self):
-        if self.downloads_path is None:
-            self.downloads_path = Path(TESTHUB_DOWNLOADS_DIR)
-            self.downloads_path.mkdir(parents=True, exist_ok=True)
-        return self
-
-    _download_validator = _BrowserProfile.__pydantic_decorators__.model_validators.get(
-        'set_default_downloads_path'
-    )
-    if _download_validator:
-        _download_validator.func.__code__ = _set_testhub_downloads_path.__code__
-except Exception as _browser_profile_error:
-    logger.warning(f"Failed to configure browser-use runtime directories: {_browser_profile_error}")
 
 import asyncio
 import functools
@@ -46,8 +13,6 @@ import json
 import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-
-from .runtime_context import normalize_openai_base_url
 
 # 加载环境变量
 load_dotenv()
@@ -949,20 +914,13 @@ from typing import Any
 
 
 class RawResponseLogger(BaseCallbackHandler):
-    def __init__(self, sensitive_values=None):
-        from .runtime_context import redact_sensitive_data
-
-        self.sensitive_values = tuple(sensitive_values or ())
-        self._redact = redact_sensitive_data
-
     def on_llm_new_token(self, token: str, **kwargs: Any) -> Any:
         pass
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
         try:
             generation = response.generations[0][0]
-            safe_text = self._redact(generation.text, self.sensitive_values)
-            logger.info(f"DEBUG: Raw LLM Response: {safe_text}")
+            logger.info(f"DEBUG: Raw LLM Response: {generation.text}")
         except:
             pass
 
@@ -977,21 +935,10 @@ from browser_use.browser.profile import BrowserProfile
 
 
 class BaseBrowserAgent:
-    def __init__(
-        self,
-        execution_mode='text',
-        enable_gif=True,
-        case_name=None,
-        sensitive_values=None,
-        sensitive_data=None,
-        allowed_domains=None,
-    ):
+    def __init__(self, execution_mode='text', enable_gif=True, case_name=None):
         self.execution_mode = 'text'
         self.enable_gif = enable_gif  # GIF录制开关
         self.case_name = case_name or "Adhoc Task"  # 用例名称
-        self.sensitive_values = tuple(sensitive_values or ())
-        self.sensitive_data = dict(sensitive_data or {})
-        self.allowed_domains = list(allowed_domains or [])
 
         # Load Config from DB
         from apps.requirement_analysis.models import AIModelConfig
@@ -1011,8 +958,7 @@ class BaseBrowserAgent:
             }
 
         self.api_key = model_config.get('api_key') or os.getenv('AUTH_TOKEN')
-        configured_base_url = model_config.get('base_url') or os.getenv('BASE_URL')
-        self.base_url = normalize_openai_base_url(configured_base_url)
+        self.base_url = model_config.get('base_url') or os.getenv('BASE_URL')
         self.model_name = model_config.get('model_name') or os.getenv('MODEL_NAME')
         self.provider = model_config.get('provider', 'openai')
 
@@ -1055,7 +1001,7 @@ class BaseBrowserAgent:
             api_key=self.api_key,
             base_url=self.base_url,
             temperature=final_temperature,
-            callbacks=[RawResponseLogger(self.sensitive_values)]
+            callbacks=[RawResponseLogger()]
         )
 
         # browser-use requirement
@@ -1343,6 +1289,8 @@ class BaseBrowserAgent:
                 "do not invent new goals, do not split into micro-actions like clicking an input box or waiting for page load. "
                 "Preserve every concrete literal requirement from the original steps, including URLs, field labels, option values, dates, expected titles, "
                 "expected result text, and quoted content. Do not replace them with vague phrases like '输入文本信息' or '验证成功'. "
+                "STRICT STEP LIMIT: Merge aggressively. The final result MUST contain at most 8 steps total, and you should aim for the minimum necessary "
+                "(typically 3-6 steps). Never exceed 8 steps under any circumstances; combining two related actions into one sentence is always better than adding a step. "
                 "Return JSON list of concise Chinese strings only.\n\n"
                 f"Task:\n{task_description}"
             )
@@ -1352,7 +1300,9 @@ class BaseBrowserAgent:
                 "Avoid micro-actions like opening the browser, clicking into an input box, or waiting for results unless they are the user's explicit goal. "
                 "Preserve every concrete literal requirement from the original task, including URLs, field labels, option values, dates, expected titles, "
                 "expected result text, and quoted content. Do not replace them with vague summaries like '输入文本信息' or '验证成功'. "
-                "Keep the order and return JSON list of concise Chinese strings only.\n\n"
+                "Keep the order. Merge aggressively into the minimum number of business steps: return at most 8 steps (typically 3-6), never more than 8. "
+                "Combining related actions into one step is always preferred over adding a separate step. "
+                "Return JSON list of concise Chinese strings only.\n\n"
                 f"Task:\n{task_description}"
             )
 
@@ -1372,7 +1322,19 @@ class BaseBrowserAgent:
 
     def _finalize_steps(self, steps, fallback_text: str):
         """统一收口步骤列表，保证输出可执行且尽量精简。"""
-        return self._compact_steps(self._normalize_steps(steps, fallback_text))
+        finalized = self._compact_steps(self._normalize_steps(steps, fallback_text))
+
+        # 硬性上限：模型偶尔会无视提示词里的步骤数约束，这里兜底裁剪。
+        # 超过上限时保留前面的核心步骤，避免一次拆出十几步导致执行中途卡死。
+        max_steps = 8
+        if len(finalized) > max_steps:
+            logger.warning(
+                f"⚠️ 模型生成的步骤过多 ({len(finalized)}), 裁剪到 {max_steps} 步: "
+                + ' | '.join(finalized[:max_steps])
+            )
+            finalized = finalized[:max_steps]
+
+        return finalized
 
     async def analyze_task(self, task_description: str):
         try:
@@ -1394,34 +1356,123 @@ class BaseBrowserAgent:
             cleaned_steps = self._finalize_steps([], task_description)
             return [{'id': i + 1, 'description': s, 'status': 'pending'} for i, s in enumerate(cleaned_steps)]
 
+    _BROWSER_PROCESS_NAMES = ('chrome', 'chromium', 'msedge', 'edge')
+
+    def _is_browseruse_process(self, cmdline):
+        """判断命令行是否属于 browser-use 启动的浏览器进程。
+
+        browser-use 用随机调试端口启动浏览器，主进程带 --remote-debugging-port，
+        但 renderer/gpu 等子进程不带该参数，只继承 --user-data-dir（指向
+        ~/.config/browseruse/profiles/... 或 browser-use-user-data-dir- 临时目录）。
+        因此要同时匹配这两个特征才能覆盖主进程和残留的子进程。
+        """
+        for arg in cmdline or []:
+            a = str(arg)
+            if '--remote-debugging-port' in a:
+                return True
+            if '--user-data-dir' in a:
+                lower = a.lower()
+                if 'browseruse' in lower or 'browser-use' in lower or 'browser_use' in lower:
+                    return True
+        return False
+
+    def _kill_browser_process_tree(self, proc):
+        """递归杀掉浏览器进程及其所有子进程，返回杀掉的进程数。
+
+        Windows 上 Chrome/Chromium 是多进程架构，browser-use 的 kill 只杀主进程，
+        renderer/gpu/utility 等子进程会残留。这里把整棵进程树都干掉。
+        """
+        import psutil
+        count = 0
+        try:
+            children = proc.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                    count += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            proc.kill()
+            count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+        return count
+
     def _cleanup_zombie_chrome(self):
-        """Clean up any existing Chrome processes on port 9222 (Linux only)"""
-        import platform
+        """清理 browser-use 遗留的僵尸浏览器进程（跨平台）。
+
+        browser-use 用 --remote-debugging-port=<随机端口> 启动浏览器，端口不固定，
+        无法用固定端口匹配。这里杀掉所有 browser-use 启动的浏览器进程树
+        （识别特征见 _is_browseruse_process；正常用户浏览器不匹配，故不会误杀）。
+        """
         import psutil
 
-        if platform.system() != 'Linux':
-            return
-
-        logger.info("🧹 Cleaning up zombie Chrome processes...")
         cleaned_count = 0
         try:
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
-                    # Check for chrome/chromium
-                    if proc.info['name'] and ('chrome' in proc.info['name'] or 'chromium' in proc.info['name']):
-                        # Check command line for port 9222
-                        cmdline = proc.info.get('cmdline', [])
-                        if cmdline and any('9222' in str(arg) for arg in cmdline):
-                            logger.info(f"Killing zombie chrome pid={proc.pid}")
-                            proc.kill()
-                            cleaned_count += 1
+                    name = (proc.info.get('name') or '').lower()
+                    if not any(b in name for b in self._BROWSER_PROCESS_NAMES):
+                        continue
+                    cmdline = proc.info.get('cmdline') or []
+                    if not self._is_browseruse_process(cmdline):
+                        continue
+                    logger.info(f"🧹 Killing zombie browser process tree pid={proc.pid}")
+                    cleaned_count += self._kill_browser_process_tree(proc)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
         except Exception as e:
-            logger.warning(f"⚠️ Failed to cleanup zombie chrome: {e}")
+            logger.warning(f"⚠️ Failed to cleanup zombie browser: {e}")
 
         if cleaned_count > 0:
-            logger.info(f"✅ Cleaned up {cleaned_count} zombie Chrome processes")
+            logger.info(f"✅ Cleaned up {cleaned_count} zombie browser processes")
+        return cleaned_count
+
+    def _snapshot_browser_pids(self):
+        """记录当前所有浏览器进程 pid，用于任务结束后精确清理本次启动的浏览器。"""
+        import psutil
+        pids = set()
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    name = (proc.info.get('name') or '').lower()
+                    if any(b in name for b in self._BROWSER_PROCESS_NAMES):
+                        pids.add(proc.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to snapshot browser pids: {e}")
+        return pids
+
+    def _cleanup_this_run_browsers(self, before_pids):
+        """杀掉本次任务启动的浏览器进程树（任务结束后必须调用）。
+
+        browser-use 用随机调试端口，无法用命令行特征识别"本次"启动的进程，
+        因此用启动前快照做差集，只清理本次任务新增的浏览器进程。
+        """
+        import psutil
+
+        killed = 0
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    name = (proc.info.get('name') or '').lower()
+                    if not any(b in name for b in self._BROWSER_PROCESS_NAMES):
+                        continue
+                    if proc.pid in before_pids:
+                        continue
+                    # 仅清理 browser-use 启动的进程，避免误杀用户手动打开的浏览器
+                    if not self._is_browseruse_process(proc.info.get('cmdline')):
+                        continue
+                    killed += self._kill_browser_process_tree(proc)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to cleanup this run's browser: {e}")
+
+        if killed > 0:
+            logger.info(f"✅ Cleaned up {killed} browser processes from this run")
+        return killed
 
     def _create_browser_profile(self):
         # Default implementation, can be overridden
@@ -1533,8 +1584,7 @@ class BaseBrowserAgent:
             wait_for_network_idle_page_load_time=0.2,
             minimum_wait_page_load_time=0.05,
             wait_between_actions=0.1,
-            enable_default_extensions=False,
-            allowed_domains=self.allowed_domains or None,
+            enable_default_extensions=False
         )
 
     async def run_task(self, task_description: str, planned_tasks=None, callback=None, should_stop=None):
@@ -1542,6 +1592,8 @@ class BaseBrowserAgent:
 
         # Cleanup potential zombie processes before starting
         self._cleanup_zombie_chrome()
+        # 记录任务开始前已存在的浏览器进程，用于结束后精确清理本次启动的浏览器
+        _before_browser_pids = self._snapshot_browser_pids()
 
         try:
             loop = asyncio.get_running_loop()
@@ -1678,6 +1730,111 @@ class BaseBrowserAgent:
                 logger.warning(f"Failed to execute update_task_status callback: {e}")
             return f"Task {task_id} marked {normalized_status}"
 
+        @controller.action('Double click on element by index. Use when single click does not activate the element (e.g., double-click required for certain UI actions).')
+        async def double_click(index: int, browser_session=None):
+            if browser_session is None:
+                raise ValueError("No browser session available")
+            try:
+                node = await browser_session.get_element_by_index(index)
+                if node is None:
+                    return f"Element index {index} not found - page may have changed"
+
+                # 使用 CDP 直接发送 clickCount=2 的鼠标事件，实现真正的双击
+                # browser-use 的 ClickElementEvent 硬编码了 clickCount=1，不支持双击
+                cdp_session = await browser_session.cdp_client_for_node(node)
+                session_id = cdp_session.session_id
+                backend_node_id = node.backend_node_id
+
+                # 获取元素坐标
+                element_rect = await browser_session.get_element_coordinates(backend_node_id, cdp_session)
+                if element_rect is None:
+                    return f"Could not get coordinates for element {index}"
+
+                center_x = element_rect.x + element_rect.width / 2
+                center_y = element_rect.y + element_rect.height / 2
+
+                # 移动鼠标到元素
+                await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+                    params={'type': 'mouseMoved', 'x': center_x, 'y': center_y},
+                    session_id=session_id,
+                )
+                await asyncio.sleep(0.05)
+
+                # 真正的双击：两次完整的 press/release 序列，clickCount 依次为 1、2。
+                # 之前的实现只发了一次 clickCount=2 的 press/release，浏览器只会触发
+                # 一次 click 事件，dblclick 监听器不会被触发，所以监控画面没弹出来。
+                for click_count in (1, 2):
+                    await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+                        params={'type': 'mousePressed', 'x': center_x, 'y': center_y, 'button': 'left', 'clickCount': click_count},
+                        session_id=session_id,
+                    )
+                    await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+                        params={'type': 'mouseReleased', 'x': center_x, 'y': center_y, 'button': 'left', 'clickCount': click_count},
+                        session_id=session_id,
+                    )
+                    await asyncio.sleep(0.06)
+
+                logger.info(f'🖱️ Double clicked element index {index} at ({center_x:.0f}, {center_y:.0f})')
+                return f"Double clicked element {index}"
+            except Exception as e:
+                return f"Failed to double click element {index}: {str(e)}"
+
+        @controller.action('Read the visible text content of the current page. Use this INSTEAD of screenshot to inspect page text, verify content (e.g. video playing status), or read on-screen values (e.g. timestamps).')
+        async def read_page_text(browser_session=None):
+            if browser_session is None:
+                raise ValueError("No browser session available")
+            try:
+                page = await browser_session.get_current_page()
+                if page is None:
+                    return "No current page available"
+
+                url = ''
+                title = ''
+                try:
+                    url = await browser_session.get_current_page_url()
+                except Exception:
+                    pass
+                try:
+                    title = await browser_session.get_current_page_title()
+                except Exception:
+                    pass
+
+                # 文本模型无法"看"截图，改用 DOM 文本让模型"读"页面内容
+                text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                if text and len(text) > 6000:
+                    text = text[:6000] + '\n...[truncated]'
+
+                # 监控/视频页面：innerText 看不到视频是否在播放，额外探测 <video> 元素状态，
+                # 让模型能真正验证"监控实时播放"（readyState/是否暂停/当前播放时间/分辨率）。
+                video_report = ''
+                try:
+                    video_report = await page.evaluate(
+                        "() => {"
+                        "const vids = Array.from(document.querySelectorAll('video'));"
+                        "if (!vids.length) return '';"
+                        "return vids.map((v, i) => {"
+                        "  const playing = !v.paused && !v.ended && v.readyState >= 2;"
+                        "  return 'video[' + i + ']: src=' + (v.currentSrc || v.src || '(none)').slice(0,120)"
+                        "    + ' playing=' + playing"
+                        "    + ' paused=' + v.paused"
+                        "    + ' readyState=' + v.readyState"
+                        "    + ' currentTime=' + (typeof v.currentTime === 'number' ? v.currentTime.toFixed(2) : v.currentTime)"
+                        "    + ' duration=' + (v.duration && isFinite(v.duration) ? v.duration.toFixed(2) : 'live')"
+                        "    + ' size=' + v.videoWidth + 'x' + v.videoHeight;"
+                        "}).join('\\n');"
+                        "}"
+                    )
+                except Exception as e:
+                    logger.warning(f'Failed to read <video> state: {e}')
+
+                logger.info(f'📄 Read page text ({len(text or "")} chars)')
+                result = f"Page URL: {url}\nPage Title: {title}\n\nVisible text:\n{text}"
+                if video_report:
+                    result += f"\n\nVideo elements:\n{video_report}"
+                return result
+            except Exception as e:
+                return f"Failed to read page text: {str(e)}"
+
         # 构建强化版 Prompt
         final_task = task_description
         if planned_tasks:
@@ -1738,6 +1895,9 @@ class BaseBrowserAgent:
         if 'qwen' in self.model_name.lower() or 'deepseek' in self.model_name.lower():
             final_task += "13. EXTREMELY MINIMIZE output tokens for speed. Keep responses as short as possible while maintaining accuracy.\n"
 
+        final_task += "14. NO SCREENSHOT: The 'screenshot' action is NOT available (this model has no vision). To inspect or verify page content (e.g. whether a video is playing, a popup appeared, or read an on-screen timestamp), ALWAYS use 'read_page_text' instead. After double-clicking a camera, call 'read_page_text' to confirm the monitoring/video window opened.\n"
+        final_task += "15. VIDEO OSD TIMESTAMP: When a task asks to 'record the monitoring video time' / '记录监控画面时间' / 'read the timestamp on the video', that timestamp is OSD text burned into the video PIXELS. A text-only model CANNOT read pixels, and 'read_page_text' CANNOT extract it. DO NOT loop retrying to read it. Instead: record the CURRENT TIME provided above (format 'YYYY-MM-DD HH:MM:SS') as the monitoring time, then IMMEDIATELY call mark_task_complete for that task. This is the expected, correct behavior.\n"
+
         # 核心修复: 清理 task 长文本中的 URL，防止中文标点紧贴 URL 导致 browser-use 解析错误
         # 例如 "http://localhost:3000，" -> "http://localhost:3000 "
         try:
@@ -1754,11 +1914,10 @@ class BaseBrowserAgent:
             llm=self.llm,
             controller=controller,
             browser_profile=browser_profile,
-            sensitive_data=self.sensitive_data or None,
             use_vision=False,
             max_actions_per_step=10,  # 增加步进密度，减少总步骤数，降低超时风险
             max_retries=1,  # 减少重试次数以提高速度 (从2改为1)
-            max_failures=2,  # 减少最大失败次数，避免过长等待 (从默认3改为2)
+            max_failures=5,  # 增加容错，避免少数不支持的 action 就导致 agent 终止
             llm_timeout=60,  # 设置LLM调用超时为60秒（支持硅基流动等大模型API）
             step_timeout=90,  # 设置每步超时为90秒
             generate_gif=self.enable_gif,  # 根据开关决定是否生成GIF
@@ -1960,14 +2119,17 @@ class BaseBrowserAgent:
             import inspect
             sig = inspect.signature(agent.run)
             if 'on_step_end' in sig.parameters:
-                await agent.run(max_steps=100, on_step_end=on_step_end)
+                await agent.run(max_steps=200, on_step_end=on_step_end)
             else:
-                await agent.run(max_steps=100)
+                await agent.run(max_steps=200)
         except KeyboardInterrupt:
             pass
         except Exception as e:
             logger.error(f"Agent execution error: {e}")
             raise
+        finally:
+            # 任务结束（无论成功/失败/中断）都清理本次启动的浏览器进程
+            self._cleanup_this_run_browsers(_before_browser_pids)
 
         # 在任务结束时检查不一致的任务状态
         history = getattr(agent, 'history', [])

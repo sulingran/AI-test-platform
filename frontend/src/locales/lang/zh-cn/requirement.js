@@ -141,13 +141,34 @@ export default {
     // Save
     saveSuccess: '成功保存 {count} 条测试用例',
     saveFailed: '保存失败',
-    alreadySaved: '测试用例已保存过',
+    alreadySaved: '该用例已保存到AI生成用例记录，请勿重复保存',
+    savedToRecords: '测试用例已保存到AI生成用例记录，请前往记录审核后采纳',
 
     // Status
     pending: '待处理',
     processing: '处理中',
     completed: '已完成',
-    failed: '失败'
+    failed: '失败',
+
+    // AI Chat Panel
+    aiChatTitle: 'AI 文档对话',
+    aiChatSubtitle: '上传成功！请告诉我您想为文档中的哪些功能生成测试用例',
+    chatWithAI: '💬 与AI对话生成用例',
+    extracting: '📄 提取中...',
+    readyToChat: '文档内容提取完成，请在下方输入您的需求',
+    backToUpload: '返回上传',
+    clearRecords: '清空对话记录',
+    chatEmptyHint: '请在下方输入指令，告诉AI您想为哪些功能生成测试用例',
+    chatSuggestions: '快捷指令：',
+    suggestionAllFeatures: '请为文档中所有功能生成测试用例',
+    suggestionMainFlow: '请为文档中的主要功能生成主流程测试用例',
+    suggestionPerformance: '请为文档中的功能生成性能测试用例',
+    suggestionBoundary: '请为文档中的功能生成边界值测试用例',
+    send: '发送',
+    chatPlaceholder: '输入指令，如：请为登录功能生成测试用例，包含主流程和2个异常场景',
+    chatHint: 'Ctrl+Enter 发送消息',
+    chatError: '对话出错',
+    you: '你'
   },
   generatedTestCases: {
     // Page
@@ -480,6 +501,16 @@ export default {
     timeoutSettingsLabel: '⏱️ 超时设置',
     reviewTimeoutLabel: '评审和改进超时时间（秒）',
     timeoutHint: 'AI评审和改进的总超时时间（建议：小文档120秒，大文档600-1800秒，超大文档可设置到3600秒）',
+
+    // Boundary Settings
+    boundarySettings: '📏 用例数量边界',
+    maxFunctionalCases: '每功能点最大功能用例数',
+    maxFunctionalHint: '每个功能点生成的功能测试用例数上限（包含1个主流程）',
+    maxPerformanceCases: '每功能点最大性能用例数',
+    maxPerformanceHint: '每个功能点生成的性能测试用例数上限（必须包含参数边界）',
+    maxOtherCases: '每功能点最大其他用例数',
+    maxOtherHint: '每个功能点生成的其他类型（安全、兼容性等）用例数上限',
+    casesPerFeature: '个/功能点',
 
     // Buttons
     cancel: '取消',

@@ -340,19 +340,13 @@ const batchDeleteTestCases = async () => {
     )
 
     isDeleting.value = true
-    let successCount = 0
-    let failCount = 0
 
-    // 逐个删除选中的测试用例
-    for (const testcase of selectedTestCases.value) {
-      try {
-        await api.delete(`/testcases/${testcase.id}/`)
-        successCount++
-      } catch (error) {
-        console.error(`Delete test case ${testcase.id} failed:`, error)
-        failCount++
-      }
-    }
+    // 调用后端批量删除端点，一次请求删除所有选中的用例
+    const ids = selectedTestCases.value.map(testcase => testcase.id)
+    const response = await api.post('/testcases/batch-delete/', { ids })
+
+    const successCount = response.data.deleted || 0
+    const failCount = (response.data.skipped || []).length
 
     // 显示删除结果
     if (successCount > 0) {

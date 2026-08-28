@@ -40,7 +40,7 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
-from .utils import execute_assertions
+from .utils import execute_assertions, ssl_verify_for
 from .operation_logger import log_operation
 from .variable_resolver import VariableResolver
 from .serializers import (
@@ -66,6 +66,7 @@ class ApiProjectViewSet(viewsets.ModelViewSet):
     queryset = ApiProject.objects.all()
     serializer_class = ApiProjectSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['project_type', 'status', 'owner']
     search_fields = ['name', 'description']
@@ -232,6 +233,7 @@ class ApiCollectionViewSet(viewsets.ModelViewSet):
     queryset = ApiCollection.objects.all()
     serializer_class = ApiCollectionSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['project', 'parent']
     
@@ -281,6 +283,7 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
     queryset = ApiRequest.objects.all()
     serializer_class = ApiRequestSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['collection', 'method', 'request_type']
     search_fields = ['name', 'url']
@@ -361,9 +364,11 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
 
             # 解析环境变量
             variables = {}
+            verify_ssl = True
             if environment_id:
                 env = Environment.objects.get(id=environment_id)
                 variables.update(env.variables)
+                verify_ssl = ssl_verify_for(env)
             
             # 使用前端发送的更新后的数据，如果没有则使用数据库中的数据
             request_params = request.data.get('params', api_request.params)
@@ -420,8 +425,15 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                     if isinstance(body_content, list):
                         body_data = self._replace_variables_in_dict(body_content, variables)
                         body_data = self._resolve_variables_in_dict(body_data, resolver)
+                    elif isinstance(body_content, dict):
+                        body_data = self._replace_variables_in_dict(body_content, variables)
+                        body_data = self._resolve_variables_in_dict(body_data, resolver)
                     else:
                         body_data = body_content
+                    # x-www-form-urlencoded: dict -> URL-encoded string
+                    if body_type == 'x-www-form-urlencoded' and isinstance(body_data, dict):
+                        from urllib.parse import urlencode
+                        body_data = urlencode(body_data)
                 else:
                     body_data = body_content
             
@@ -429,7 +441,7 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
             start_time = time.time()
 
             # 根据请求体类型决定使用 data 还是 json 参数
-            if body_type == 'raw':
+            if body_type in ('raw', 'x-www-form-urlencoded'):
                 # raw 类型使用 data 参数，发送原始字符串
                 response = requests.request(
                     method=request_method,
@@ -437,7 +449,8 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                     headers=headers,
                     params=params,
                     data=body_data,
-                    timeout=30
+                    timeout=30,
+                    verify=verify_ssl
                 )
             else:
                 # json 类型使用 json 参数，自动序列化
@@ -447,7 +460,8 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                     headers=headers,
                     params=params,
                     json=body_data,
-                    timeout=30
+                    timeout=30,
+                    verify=verify_ssl
                 )
             end_time = time.time()
             

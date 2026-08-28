@@ -5,6 +5,21 @@ from .models import RequestHistory
 from .variable_resolver import VariableResolver
 
 
+def ssl_verify_for(environment):
+    """根据环境变量 verify_ssl 决定是否校验 HTTPS 证书（默认校验）。
+
+    内网自签名证书的环境（如 https://192.168.x.x）可在该环境的变量里
+    添加 verify_ssl = false 来关闭证书校验。
+    """
+    if not environment:
+        return True
+    variables = getattr(environment, 'variables', None) or {}
+    value = variables.get('verify_ssl', True)
+    if isinstance(value, dict):
+        value = value.get('currentValue') or value.get('initialValue', True)
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
 def execute_assertions(response, assertions):
     """执行断言验证"""
     results = []

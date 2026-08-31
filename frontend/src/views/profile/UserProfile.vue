@@ -56,4 +56,7 @@ import { useUserStore } from '@/stores/user'
 
 const userStore = useUserStore()
 const activeTab = ref('basic')
+
+// TODO: 「保存」(基本信息) 与「修改密码」两个按钮尚未绑定提交逻辑，
+//       后续需接后端用户资料更新 / 改密接口后再实现。
 </script>

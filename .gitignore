@@ -150,3 +150,7 @@ frontend/src/api/app-automation.js
 frontend/src/utils/app-automation-helpers.js
 frontend/src/locales/lang/en/app-automation.js
 frontend/src/locales/lang/zh-cn/app-automation.js
+
+# 工程卫生归档区（本地回退副本，含真实环境凭据 / 孤儿页面，不上传公共仓库）
+archive/
+frontend/src/_archive/

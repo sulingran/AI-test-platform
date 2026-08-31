@@ -1796,13 +1796,9 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                             await engine.stop()
                             execution_logs.append("✓ 浏览器已关闭")
 
-                    # 在新的事件循环中运行测试
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(run_test())
-                    finally:
-                        loop.close()
+                    # 在新的事件循环中运行测试（复用 Proactor 事件循环，规避 Daphne 篡改策略）
+                    from .ai_agent import _run_agent_coro
+                    _run_agent_coro(run_test())
 
                 # 在独立线程中运行Playwright测试
                 import threading
@@ -2430,13 +2426,9 @@ class UiScheduledTaskViewSet(viewsets.ModelViewSet):
                                         finally:
                                             await engine.stop()
 
-                                    # 在新的事件循环中运行Playwright测试
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    try:
-                                        loop.run_until_complete(run_playwright_test())
-                                    finally:
-                                        loop.close()
+                                    # 在新的事件循环中运行Playwright测试（复用 Proactor 事件循环）
+                                    from .ai_agent import _run_agent_coro
+                                    _run_agent_coro(run_playwright_test())
 
                                 # 计算执行时间
                                 total_time = round(time.time() - start_time, 2)
@@ -3081,15 +3073,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
                 execution_record.steps_completed = steps
 
-                # 后处理：清理未标记的子任务 (pending → skipped)
-                if execution_record.planned_tasks:
-                    self._auto_mark_completed_tasks(execution_record)
-                    execution_record.logs = append_execution_summary(
-                        execution_record.logs,
-                        summarize_planned_tasks(execution_record.planned_tasks)
-                    )
-
-                # 最终状态判定（在 task 清理之后，确保状态准确）
+                # 最终状态判定：基于真实执行状态（在 task 清理之前判定，避免漏标子任务被吞成通过）
                 if not should_stop() and execution_record.planned_tasks:
                     status, summary = resolve_execution_status(execution_record.planned_tasks)
                     execution_record.status = status
@@ -3104,6 +3088,14 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
                     logger.info(
                         f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
+
+                # 后处理：清理未标记的子任务 (pending → skipped)，仅作展示性清理
+                if execution_record.planned_tasks:
+                    self._auto_mark_completed_tasks(execution_record)
+                    execution_record.logs = append_execution_summary(
+                        execution_record.logs,
+                        summarize_planned_tasks(execution_record.planned_tasks)
+                    )
 
                 # 处理GIF录制文件
                 self._process_gif_recording(execution_record, history)
@@ -3632,15 +3624,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
                 execution_record.steps_completed = steps
 
-                # 后处理：清理未标记的子任务 (pending → skipped)
-                if execution_record.planned_tasks:
-                    self._auto_mark_completed_tasks(execution_record)
-                    execution_record.logs = append_execution_summary(
-                        execution_record.logs,
-                        summarize_planned_tasks(execution_record.planned_tasks)
-                    )
-
-                # 最终状态判定（在 task 清理之后，确保状态准确）
+                # 最终状态判定：基于真实执行状态（在 task 清理之前判定，避免漏标子任务被吞成通过）
                 if not should_stop_sync() and execution_record.planned_tasks:
                     status, summary = resolve_execution_status(execution_record.planned_tasks)
                     execution_record.status = status
@@ -3655,6 +3639,14 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     pending_tasks = len([t for t in execution_record.planned_tasks if t.get('status') == 'pending'])
                     logger.info(
                         f"🏁 Task completion summary: {completed_tasks}/{total_tasks} tasks completed, {pending_tasks} pending")
+
+                # 后处理：清理未标记的子任务 (pending → skipped)，仅作展示性清理
+                if execution_record.planned_tasks:
+                    self._auto_mark_completed_tasks(execution_record)
+                    execution_record.logs = append_execution_summary(
+                        execution_record.logs,
+                        summarize_planned_tasks(execution_record.planned_tasks)
+                    )
 
                 # 处理GIF录制文件
                 self._process_gif_recording(execution_record, history)

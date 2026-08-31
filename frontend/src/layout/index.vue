@@ -350,7 +350,6 @@ const breadcrumbTitle = computed(() => {
     '/ai-generation/versions': t('menu.versionManagement'),
     '/ai-generation/reviews': t('menu.reviewList'),
     '/ai-generation/review-templates': t('menu.reviewTemplates'),
-    '/ai-generation/testsuites': t('menu.suiteManagement'),
     '/ai-generation/executions': t('menu.executionRecords'),
     '/ai-generation/reports': t('menu.testReport'),
 

@@ -144,11 +144,6 @@ const routes = [
                 component: () => import('@/views/reviews/ReviewTemplateList.vue')
             },
             {
-                path: 'testsuites',
-                name: 'TestSuites',
-                component: () => import('@/views/testsuites/TestSuiteList.vue')
-            },
-            {
                 path: 'executions',
                 name: 'Executions',
                 component: () => import('@/views/executions/ExecutionListView.vue')

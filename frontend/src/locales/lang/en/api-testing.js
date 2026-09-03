@@ -170,6 +170,7 @@ export default {
     inputRequestUrl: 'Enter request URL',
     environment: 'Environment',
     send: 'Send',
+    getToken: 'Get Token',
     connect: 'Connect',
     connecting: 'Connecting',
     disconnect: 'Disconnect',

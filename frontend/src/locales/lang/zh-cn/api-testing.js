@@ -170,6 +170,7 @@ export default {
     inputRequestUrl: '输入请求URL',
     environment: '环境',
     send: '发送',
+    getToken: '获取Token',
     connect: '连接',
     connecting: '连接中',
     disconnect: '关闭连接',

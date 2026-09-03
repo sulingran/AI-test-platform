@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 from .utils import execute_assertions, ssl_verify_for
 from .operation_logger import log_operation
 from .variable_resolver import VariableResolver
+from apps.core.real_env_token import (
+    decode_jwt_exp,
+    fetch_real_env_token,
+    write_token_to_environment,
+)
 from .serializers import (
     ApiProjectSerializer, ApiCollectionSerializer, ApiRequestSerializer,
     EnvironmentSerializer, RequestHistorySerializer, TestSuiteSerializer,
@@ -602,8 +607,29 @@ class EnvironmentViewSet(viewsets.ModelViewSet):
         
         environment.is_active = True
         environment.save()
-        
+
         return Response({'message': '环境已激活'})
+
+    @action(detail=True, methods=['post'])
+    def refresh_token(self, request, pk=None):
+        """一键登录真实环境获取新 token，写入该环境的 token 变量"""
+        environment = self.get_object()
+        token = fetch_real_env_token()
+        if not token:
+            return Response({'error': '登录真实环境失败'}, status=status.HTTP_400_BAD_REQUEST)
+        write_token_to_environment(environment, token)
+        log_operation(
+            operation_type='edit',
+            resource_type='environment',
+            resource_id=environment.id,
+            resource_name=environment.name,
+            user=request.user,
+            description=f"一键获取token并写入环境「{environment.name}」"
+        )
+        return Response({
+            'message': '已更新 token',
+            'expires_at': decode_jwt_exp(token),
+        })
 
     def perform_create(self, serializer):
         """创建环境时记录日志"""

@@ -192,6 +192,16 @@
               >
                 {{ $t('apiTesting.interface.send') }}
               </el-button>
+
+              <!-- 一键获取Token按钮 -->
+              <el-button
+                type="default"
+                @click="fetchTokenAndWrite"
+                :loading="tokenRefreshing"
+                class="token-button"
+              >
+                {{ $t('apiTesting.interface.getToken') }}
+              </el-button>
             </div>
 
             <div class="request-meta">
@@ -998,6 +1008,7 @@ const selectedRequest = ref(null)
 const response = ref(null)
 const sending = ref(false)
 const saving = ref(false)
+const tokenRefreshing = ref(false)
 const activeTab = ref('params')
 const resultActiveTab = ref('response')
 const responseActiveTab = ref('body')
@@ -1812,6 +1823,25 @@ const sendRequest = async () => {
     console.error('请求失败:', error)
   } finally {
     sending.value = false
+  }
+}
+
+const fetchTokenAndWrite = async () => {
+  const target = environments.value.find(env => /真实环境/.test(env.name || ''))
+  if (!target) {
+    ElMessage.warning('未找到「真实环境」环境变量')
+    return
+  }
+  try {
+    tokenRefreshing.value = true
+    const resp = await api.post(`/api-testing/environments/${target.id}/refresh_token/`)
+    const expiresAt = resp.data?.expires_at
+    ElMessage.success(expiresAt ? `token 已写入「${target.name}」（过期时间 ${expiresAt}）` : `token 已写入「${target.name}」`)
+  } catch (error) {
+    ElMessage.error('获取 token 失败')
+    console.error('获取 token 失败:', error)
+  } finally {
+    tokenRefreshing.value = false
   }
 }
 

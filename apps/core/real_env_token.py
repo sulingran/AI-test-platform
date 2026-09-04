@@ -1,27 +1,67 @@
-"""真实环境登录取 token 的共享工具（供 refresh_token 命令与接口 API 复用）。
+"""Helpers for refreshing a token from a configured real environment."""
 
-把原先散落在 refresh_token 管理命令里的登录逻辑抽出，供命令行与 HTTP 接口共用，
-避免同一段“登录真实环境→拿 token→写回环境变量”逻辑在两处重复实现。
-"""
 import base64
 import datetime
 import json
+import logging
+import os
 
 import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-# 真实环境登录（与 docs/setup 下探测脚本保持一致）
-REAL_ENV_BASE = "https://192.168.159.114:9993"
+logger = logging.getLogger(__name__)
+
 LOGIN_PATH = "/uap-change-service/oauth/token"
-DEFAULT_USERNAME = "admin"
-DEFAULT_PASSWORD = "UZfpjBdeLX/5wCRnYYntxw=="  # 已加密的密码串
-LOGIN_TYPE = "2"
+DEFAULT_LOGIN_TYPE = "2"
 
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+class RealEnvTokenConfigError(ValueError):
+    """Raised when real-environment token configuration is incomplete."""
+
+
+def _read_bool(name, default=True):
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RealEnvTokenConfigError(f"{name} must be a boolean value")
+
+
+def _get_login_config():
+    """Read login settings without exposing secret values."""
+    required = {
+        "REAL_ENV_BASE_URL": os.getenv("REAL_ENV_BASE_URL", "").strip(),
+        "REAL_ENV_USERNAME": os.getenv("REAL_ENV_USERNAME", "").strip(),
+        "REAL_ENV_PASSWORD": os.getenv("REAL_ENV_PASSWORD", ""),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RealEnvTokenConfigError(
+            "missing required settings: " + ", ".join(missing)
+        )
+
+    base_url = required["REAL_ENV_BASE_URL"].rstrip("/")
+    if not base_url.startswith(("https://", "http://")):
+        raise RealEnvTokenConfigError(
+            "REAL_ENV_BASE_URL must include http:// or https://"
+        )
+
+    return {
+        "url": base_url + LOGIN_PATH,
+        "username": required["REAL_ENV_USERNAME"],
+        "password": required["REAL_ENV_PASSWORD"],
+        "login_type": os.getenv("REAL_ENV_LOGIN_TYPE", DEFAULT_LOGIN_TYPE).strip()
+        or DEFAULT_LOGIN_TYPE,
+        "verify": os.getenv("REAL_ENV_CA_BUNDLE", "").strip()
+        or _read_bool("REAL_ENV_VERIFY_SSL"),
+    }
 
 
 def decode_jwt_exp(token):
-    """从 JWT payload 解析过期时间（本地时区），失败返回 None。"""
+    """Return a JWT expiry timestamp in local time, or None if unavailable."""
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
@@ -35,30 +75,37 @@ def decode_jwt_exp(token):
 
 
 def fetch_real_env_token():
-    """登录真实环境，成功返回 accessToken，失败返回 None。"""
+    """Login to the real environment and return accessToken, or None on failure."""
     try:
-        r = requests.post(
-            REAL_ENV_BASE + LOGIN_PATH,
+        login = _get_login_config()
+        response = requests.post(
+            login["url"],
             data={
-                "userName": DEFAULT_USERNAME,
-                "password": DEFAULT_PASSWORD,
-                "loginType": LOGIN_TYPE,
+                "userName": login["username"],
+                "password": login["password"],
+                "loginType": login["login_type"],
             },
             timeout=25,
-            verify=False,
+            verify=login["verify"],
         )
-        r.raise_for_status()
-        return r.json()["data"]["accessToken"]
+        response.raise_for_status()
+        token = response.json()["data"]["accessToken"]
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("response did not contain a non-empty access token")
+        return token
+    except RealEnvTokenConfigError as exc:
+        logger.error("Real environment token configuration error: %s", exc)
+    except requests.RequestException as exc:
+        logger.error("Real environment token request failed: %s", type(exc).__name__)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.error("Real environment token response invalid: %s", type(exc).__name__)
     except Exception:
-        return None
+        logger.exception("Unexpected real environment token error")
+    return None
 
 
 def write_token_to_environment(env, token):
-    """把 token 写回环境的 variables["token"]，保留原有取值结构。
-
-    原值是 dict（{currentValue, initialValue}）则写回 dict；否则写纯字符串。
-    缺失时也会创建。
-    """
+    """Write token to variables["token"] while preserving its value shape."""
     variables = env.variables or {}
     old = variables.get("token")
     if isinstance(old, dict):

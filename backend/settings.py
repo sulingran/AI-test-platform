@@ -49,6 +49,7 @@ REGISTRATION_STATS_VISIBLE_USERNAMES = config(
     default='',
     cast=parse_csv,
 )
+AI_OBSERVABILITY_ENABLED = config('AI_OBSERVABILITY_ENABLED', default=True, cast=bool)
 APP_USE_HTTPS = config('APP_USE_HTTPS', default=not DEBUG, cast=bool)
 TRUST_PROXY_SSL_HEADER = config('TRUST_PROXY_SSL_HEADER', default=APP_USE_HTTPS, cast=bool)
 
@@ -64,6 +65,7 @@ LOCAL_APPS = [
     'apps.defects',
     'apps.assistant',
     'apps.requirement_analysis',
+    'apps.ai.apps.AIConfig',
     'apps.api_testing',
     'apps.ui_automation.apps.UiAutomationConfig',
     'apps.core',
@@ -156,6 +158,7 @@ STATIC_FILES_ROOT = os.path.join(BASE_DIR, 'static_files')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+OPENAPI_IMPORT_MAX_BYTES = config('OPENAPI_IMPORT_MAX_BYTES', default=5 * 1024 * 1024, cast=int)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

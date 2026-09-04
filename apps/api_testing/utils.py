@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from django.utils import timezone
 from .models import RequestHistory
@@ -18,6 +19,72 @@ def ssl_verify_for(environment):
     if isinstance(value, dict):
         value = value.get('currentValue') or value.get('initialValue', True)
     return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def _params_to_dict(params):
+    """Convert either legacy objects or editable key/value rows for execution."""
+    if isinstance(params, dict):
+        return dict(params)
+    result = {}
+    for row in params or []:
+        if isinstance(row, dict) and row.get('enabled', True) and row.get('key'):
+            result[row['key']] = row.get('value', '')
+    return result
+
+
+def _replace_path_params(url, path_params, variables, resolver):
+    """Replace single-brace OpenAPI path tokens without touching {{variables}}."""
+    if not isinstance(url, str) or not path_params:
+        return url
+    mapping = path_params if isinstance(path_params, dict) else {
+        row.get('key'): row.get('value')
+        for row in path_params
+        if isinstance(row, dict) and row.get('enabled', True) and row.get('key')
+    }
+    result = url
+    for key, value in mapping.items():
+        resolved = resolver.resolve(_replace_variables(str(value or ''), variables))
+        if not key or resolved == '':
+            continue
+        pattern = r'(?<!\{)\{' + re.escape(str(key)) + r'\}(?!\})'
+        result = re.sub(pattern, lambda _: resolved, result)
+    return result
+
+
+def prepare_request_body(body, method, variables, resolver):
+    """Resolve variables in a stored body and return its transport type/content."""
+    if not body or method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return 'none', None
+    body_type = body.get('type', 'none')
+    content = body.get('data')
+    if body_type == 'none':
+        return body_type, None
+    content = _replace_variables_in_dict(content, variables)
+    content = _resolve_variables_in_dict(content, resolver)
+    return body_type, content
+
+
+def request_body_kwargs(body_type, body_content):
+    """Map the saved body representation to requests.request keyword arguments."""
+    if body_type == 'none':
+        return {}
+    if body_type in {'x-www-form-urlencoded', 'form-data'}:
+        if isinstance(body_content, dict):
+            body_content = [
+                {'key': key, 'value': value, 'enabled': True}
+                for key, value in body_content.items()
+            ]
+        enabled = [
+            item for item in (body_content or [])
+            if isinstance(item, dict) and item.get('enabled', True) and item.get('key')
+        ]
+        values = {item['key']: item.get('value', '') for item in enabled}
+        if body_type == 'form-data':
+            return {'files': {key: (None, value) for key, value in values.items()}}
+        return {'data': values}
+    if body_type == 'raw':
+        return {'data': body_content}
+    return {'json': body_content}
 
 
 def execute_assertions(response, assertions):
@@ -161,6 +228,9 @@ def execute_test_suite(test_suite, environment, executed_by):
                 # 替换URL中的变量（先解析动态函数，再替换环境变量）
                 url = _replace_variables(api_request.url, variables)
                 url = resolver.resolve(url)
+                url = _replace_path_params(
+                    url, getattr(api_request, 'path_params', None), variables, resolver,
+                )
                 
                 # 准备请求头
                 headers = {}
@@ -178,18 +248,14 @@ def execute_test_suite(test_suite, environment, executed_by):
                         headers[key] = resolver.resolve(headers[key])
                 
                 # 准备请求参数
-                params = api_request.params.copy() if api_request.params else {}
+                params = _params_to_dict(api_request.params)
                 for key, value in params.items():
                     params[key] = _replace_variables(str(value), variables)
                     params[key] = resolver.resolve(params[key])
                 
-                # 准备请求体
-                body_data = None
-                if api_request.body and api_request.method in ['POST', 'PUT', 'PATCH']:
-                    if api_request.body.get('type') == 'json':
-                        body_data = api_request.body.get('data', {})
-                        body_data = _replace_variables_in_dict(body_data, variables)
-                        body_data = _resolve_variables_in_dict(body_data, resolver)
+                body_type, body_data = prepare_request_body(
+                    api_request.body, api_request.method, variables, resolver,
+                )
                 
                 # 执行请求
                 start_time = time.time()
@@ -198,8 +264,8 @@ def execute_test_suite(test_suite, environment, executed_by):
                     url=url,
                     headers=headers,
                     params=params,
-                    json=body_data,
-                    timeout=30
+                    timeout=30,
+                    **request_body_kwargs(body_type, body_data),
                 )
                 end_time = time.time()
                 response_time = (end_time - start_time) * 1000
@@ -322,6 +388,9 @@ def execute_api_request(api_request, environment, executed_by):
         # 替换URL中的变量（先解析动态函数，再替换环境变量）
         url = _replace_variables(api_request.url, variables)
         url = resolver.resolve(url)
+        url = _replace_path_params(
+            url, getattr(api_request, 'path_params', None), variables, resolver,
+        )
         
         # 准备请求头
         headers = {}
@@ -339,18 +408,14 @@ def execute_api_request(api_request, environment, executed_by):
                 headers[key] = resolver.resolve(headers[key])
         
         # 准备请求参数
-        params = api_request.params.copy() if api_request.params else {}
+        params = _params_to_dict(api_request.params)
         for key, value in params.items():
             params[key] = _replace_variables(str(value), variables)
             params[key] = resolver.resolve(params[key])
         
-        # 准备请求体
-        body_data = None
-        if api_request.body and api_request.method in ['POST', 'PUT', 'PATCH']:
-            if api_request.body.get('type') == 'json':
-                body_data = api_request.body.get('data', {})
-                body_data = _replace_variables_in_dict(body_data, variables)
-                body_data = _resolve_variables_in_dict(body_data, resolver)
+        body_type, body_data = prepare_request_body(
+            api_request.body, api_request.method, variables, resolver,
+        )
         
         # 执行请求
         start_time = time.time()
@@ -359,8 +424,8 @@ def execute_api_request(api_request, environment, executed_by):
             url=url,
             headers=headers,
             params=params,
-            json=body_data,
-            timeout=30
+            timeout=30,
+            **request_body_kwargs(body_type, body_data),
         )
         end_time = time.time()
         response_time = (end_time - start_time) * 1000

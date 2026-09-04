@@ -1,0 +1,31 @@
+# Copy to .docker_env and replace every placeholder before starting Compose.
+# .docker_env is ignored by Git.
+
+SECRET_KEY=replace-with-a-long-random-secret
+DEBUG=False
+ALLOWED_HOSTS=localhost,127.0.0.1
+CORS_ALLOWED_ORIGINS=http://localhost:18081,http://127.0.0.1:18081
+CSRF_TRUSTED_ORIGINS=http://localhost:18081,http://127.0.0.1:18081
+APP_USE_HTTPS=False
+TRUST_PROXY_SSL_HEADER=False
+
+# These credentials are for the Compose-owned MySQL volume only.
+MYSQL_ROOT_PASSWORD=replace-with-a-root-password
+DB_NAME=testhub
+DB_USER=testhub
+DB_PASSWORD=replace-with-an-application-password
+
+FRONTEND_PORT=18081
+BACKEND_PORT=18181
+DOCKER_NAMESPACE=testhub
+IMAGE_VERSION=latest
+SCHEDULER_INTERVAL=300
+
+# Startup never runs makemigrations or migrate. Keep this false unless you have
+# reviewed the explicit, additive setup commands and backed up the target DB.
+SCHEMA_SETUP_ENABLED=False
+RUN_COLLECTSTATIC=True
+
+REDIS_URL=redis://redis:6379/0
+AI_OBSERVABILITY_ENABLED=True
+OPENAPI_IMPORT_MAX_BYTES=5242880

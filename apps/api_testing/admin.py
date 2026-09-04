@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     ApiProject, ApiCollection, ApiRequest, Environment, RequestHistory,
-    TestSuite, TestExecution, ScheduledTask, TaskExecutionLog, AIServiceConfig
+    TestSuite, TestExecution, ScheduledTask, TaskExecutionLog, AIServiceConfig,
+    ApiDocument,
 )
 
 
@@ -25,6 +26,14 @@ class ApiRequestAdmin(admin.ModelAdmin):
     list_display = ['name', 'method', 'request_type', 'collection', 'created_by', 'created_at']
     list_filter = ['method', 'request_type', 'created_at']
     search_fields = ['name', 'url']
+
+
+@admin.register(ApiDocument)
+class ApiDocumentAdmin(admin.ModelAdmin):
+    list_display = ['title', 'spec_version', 'status', 'project', 'uploaded_by', 'imported_count', 'created_at']
+    list_filter = ['spec_version', 'status', 'created_at']
+    search_fields = ['title', 'project__name']
+    readonly_fields = ['parsed_endpoints', 'file_size', 'imported_count', 'created_at', 'updated_at']
 
 
 @admin.register(Environment)

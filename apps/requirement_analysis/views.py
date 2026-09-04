@@ -47,6 +47,7 @@ from .serializers import (
     GenerationConfigSerializer
 )
 from .services import RequirementAnalysisService, DocumentProcessor
+from apps.ai.prompt_registry import get_prompt as get_file_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1317,9 +1318,13 @@ class PromptConfigViewSet(viewsets.ModelViewSet):
         """加载默认提示词"""
         try:
             # 读取用例编写提示词
-            writer_prompt_path = os.path.join(settings.BASE_DIR, 'docs/tester.md')
+            prompt_metadata = {
+                prompt_type: get_file_prompt(prompt_type)
+                for prompt_type in ("writer", "reviewer")
+            }
+            writer_prompt_path = os.path.join(settings.BASE_DIR, prompt_metadata['writer']['source'])
             # 读取用例评审提示词
-            reviewer_prompt_path = os.path.join(settings.BASE_DIR, 'docs/tester_pro.md')
+            reviewer_prompt_path = os.path.join(settings.BASE_DIR, prompt_metadata['reviewer']['source'])
 
             defaults = {}
 
@@ -1396,7 +1401,15 @@ class PromptConfigViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'message': '默认提示词加载成功',
-                'defaults': defaults
+                'defaults': defaults,
+                'metadata': {
+                    prompt_type: {
+                        'version': metadata['version'],
+                        'source': metadata['source'],
+                        'sha256': metadata['sha256'],
+                    }
+                    for prompt_type, metadata in prompt_metadata.items()
+                }
             }, status=status.HTTP_200_OK)
 
         except Exception as e:

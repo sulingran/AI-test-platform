@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/assistant/', include('apps.assistant.urls')),
     path('api/users/', include('apps.users.urls')),
     path('api/requirement-analysis/', include('apps.requirement_analysis.urls')),
+    path('api/ai/', include('apps.ai.urls')),
     path('api/ui-automation/', include('apps.ui_automation.urls')),
     path('api/', include('apps.api_testing.urls')),
     path('api/core/', include('apps.core.urls')),

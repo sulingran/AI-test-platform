@@ -25,7 +25,7 @@ from .models import (
     ApiProject, ApiCollection, ApiRequest, Environment,
     RequestHistory, TestSuite, TestExecution, TestSuiteRequest,
     ScheduledTask, TaskExecutionLog, NotificationLog,
-    TaskNotificationSetting, OperationLog, AIServiceConfig,
+    TaskNotificationSetting, OperationLog, AIServiceConfig, ApiDocument,
 )
 
 from .serializers import (
@@ -35,13 +35,18 @@ from .serializers import (
     ScheduledTaskSerializer, TaskExecutionLogSerializer,
     NotificationLogSerializer, TaskNotificationSettingSerializer,
     NotificationLogDetailSerializer,
-    TaskNotificationSettingDetailSerializer, OperationLogSerializer
+    TaskNotificationSettingDetailSerializer, OperationLogSerializer,
+    ApiDocumentUploadSerializer, ApiDocumentSerializer, ApiDocumentImportSerializer,
 )
 
 logger = logging.getLogger(__name__)
 
-from .utils import execute_assertions, ssl_verify_for
+from .utils import (
+    _params_to_dict, _replace_path_params, execute_assertions,
+    prepare_request_body, request_body_kwargs, ssl_verify_for,
+)
 from .operation_logger import log_operation
+from .access import accessible_api_projects, accessible_environments
 from .variable_resolver import VariableResolver
 from apps.core.real_env_token import (
     decode_jwt_exp,
@@ -362,6 +367,21 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
         """执行API请求"""
         api_request = self.get_object()
         environment_id = request.data.get('environment_id')
+        environment = None
+        if environment_id:
+            environment = get_object_or_404(
+                accessible_environments(request.user),
+                id=environment_id,
+            )
+            if (
+                environment.scope == 'LOCAL'
+                and api_request.collection_id
+                and environment.project_id != api_request.collection.project_id
+            ):
+                return Response(
+                    {'error': '局部环境必须与接口属于同一项目'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         
         try:
             # 创建变量解析器
@@ -370,10 +390,9 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
             # 解析环境变量
             variables = {}
             verify_ssl = True
-            if environment_id:
-                env = Environment.objects.get(id=environment_id)
-                variables.update(env.variables)
-                verify_ssl = ssl_verify_for(env)
+            if environment:
+                variables.update(environment.variables)
+                verify_ssl = ssl_verify_for(environment)
             
             # 使用前端发送的更新后的数据，如果没有则使用数据库中的数据
             request_params = request.data.get('params', api_request.params)
@@ -385,6 +404,10 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
             # 替换URL中的变量（先解析动态函数，再替换环境变量）
             url = self._replace_variables(request_url or '', variables)
             url = resolver.resolve(url)
+            path_params = request.data.get(
+                'path_params', getattr(api_request, 'path_params', None) or [],
+            )
+            url = _replace_path_params(url, path_params, variables, resolver)
             
             # 准备请求头
             headers = {}
@@ -402,72 +425,27 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                     headers[key] = resolver.resolve(headers[key])
 
             # 准备请求参数
-            params = request_params.copy() if request_params else {}
+            params = _params_to_dict(request_params)
             for key, value in params.items():
                 params[key] = self._replace_variables(str(value), variables)
                 params[key] = resolver.resolve(params[key])
 
-            # 准备请求体
-            body_data = None
-            body_type = 'none'
-            if request_body and request_method in ['POST', 'PUT', 'PATCH']:
-                body_type = request_body.get('type', 'none')
-                body_content = request_body.get('data')
-
-                if body_type == 'json':
-                    if isinstance(body_content, dict):
-                        body_data = self._replace_variables_in_dict(body_content, variables)
-                        body_data = self._resolve_variables_in_dict(body_data, resolver)
-                    else:
-                        body_data = body_content
-                elif body_type == 'raw':
-                    if isinstance(body_content, str):
-                        body_data = self._replace_variables(body_content, variables)
-                        body_data = resolver.resolve(body_data)
-                    else:
-                        body_data = body_content
-                elif body_type in ['form-data', 'x-www-form-urlencoded']:
-                    if isinstance(body_content, list):
-                        body_data = self._replace_variables_in_dict(body_content, variables)
-                        body_data = self._resolve_variables_in_dict(body_data, resolver)
-                    elif isinstance(body_content, dict):
-                        body_data = self._replace_variables_in_dict(body_content, variables)
-                        body_data = self._resolve_variables_in_dict(body_data, resolver)
-                    else:
-                        body_data = body_content
-                    # x-www-form-urlencoded: dict -> URL-encoded string
-                    if body_type == 'x-www-form-urlencoded' and isinstance(body_data, dict):
-                        from urllib.parse import urlencode
-                        body_data = urlencode(body_data)
-                else:
-                    body_data = body_content
+            body_type, body_data = prepare_request_body(
+                request_body, request_method, variables, resolver,
+            )
             
             # 执行请求
             start_time = time.time()
 
-            # 根据请求体类型决定使用 data 还是 json 参数
-            if body_type in ('raw', 'x-www-form-urlencoded'):
-                # raw 类型使用 data 参数，发送原始字符串
-                response = requests.request(
-                    method=request_method,
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    data=body_data,
-                    timeout=30,
-                    verify=verify_ssl
-                )
-            else:
-                # json 类型使用 json 参数，自动序列化
-                response = requests.request(
-                    method=request_method,
-                    url=url,
-                    headers=headers,
-                    params=params,
-                    json=body_data,
-                    timeout=30,
-                    verify=verify_ssl
-                )
+            response = requests.request(
+                method=request_method,
+                url=url,
+                headers=headers,
+                params=params,
+                timeout=30,
+                verify=verify_ssl,
+                **request_body_kwargs(body_type, body_data),
+            )
             end_time = time.time()
             
             response_time = (end_time - start_time) * 1000  # 转换为毫秒
@@ -579,16 +557,7 @@ class EnvironmentViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
     
     def get_queryset(self):
-        user = self.request.user
-        return Environment.objects.filter(
-            models.Q(scope='GLOBAL') | 
-            models.Q(
-                scope='LOCAL',
-                project__in=ApiProject.objects.filter(
-                    models.Q(owner=user) | models.Q(members=user)
-                )
-            )
-        ).distinct().order_by('-created_at')
+        return accessible_environments(self.request.user).order_by('-created_at')
     
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
@@ -761,6 +730,9 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                     # 替换URL中的变量（先解析动态函数，再替换环境变量）
                     url = self._replace_variables(api_request.url, variables)
                     url = resolver.resolve(url)
+                    url = _replace_path_params(
+                        url, getattr(api_request, 'path_params', None), variables, resolver,
+                    )
 
                     # 准备请求头
                     headers = {}
@@ -780,17 +752,14 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                             headers[key] = self._replace_variables(str(value), variables)
                             headers[key] = resolver.resolve(headers[key])
 
-                    params = api_request.params.copy()
+                    params = _params_to_dict(api_request.params)
                     for key, value in params.items():
                         params[key] = self._replace_variables(str(value), variables)
                         params[key] = resolver.resolve(params[key])
 
-                    body_data = None
-                    if api_request.body and api_request.method in ['POST', 'PUT', 'PATCH']:
-                        if api_request.body.get('type') == 'json':
-                            body_data = api_request.body.get('data', {})
-                            body_data = self._replace_variables_in_dict(body_data, variables)
-                            body_data = self._resolve_variables_in_dict(body_data, resolver)
+                    body_type, body_data = prepare_request_body(
+                        api_request.body, api_request.method, variables, resolver,
+                    )
 
                     # 执行请求
                     start_time = time.time()
@@ -799,8 +768,8 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                         url=url,
                         headers=headers,
                         params=params,
-                        json=body_data,
-                        timeout=30
+                        timeout=30,
+                        **request_body_kwargs(body_type, body_data),
                     )
                     end_time = time.time()
                     response_time = (end_time - start_time) * 1000
@@ -2599,6 +2568,7 @@ URL参数:
         except Exception as e:
             return Response({'error': f'未知错误: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
     @action(detail=False, methods=['post'])
     def generate_mock_data(self, request):
         """使用AI生成模拟数据"""
@@ -2829,3 +2799,120 @@ URL参数: {json.dumps(request_data['params'], ensure_ascii=False)}
             return Response({'error': f'AI服务调用失败: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
             return Response({'error': f'未知错误: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ApiDocumentViewSet(viewsets.ModelViewSet):
+    """Upload, preview and import OpenAPI/Swagger documents."""
+
+    queryset = ApiDocument.objects.select_related('project', 'uploaded_by')
+    serializer_class = ApiDocumentSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return ApiDocumentUploadSerializer
+        return ApiDocumentSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = super().get_queryset()
+        if user.is_superuser:
+            return queryset
+        return queryset.filter(project__in=accessible_api_projects(user)).distinct()
+
+    def perform_destroy(self, instance):
+        storage = instance.file.storage if instance.file else None
+        file_name = instance.file.name if instance.file else ''
+        instance.delete()
+        if storage and file_name:
+            storage.delete(file_name)
+
+    @action(detail=True, methods=['post'], url_path='parse')
+    def parse_document(self, request, pk=None):
+        document = self.get_object()
+        document.status = 'parsing'
+        document.save(update_fields=['status', 'updated_at'])
+        try:
+            from .openapi_import import OpenAPIParseError, OpenAPISpecParser
+
+            result = OpenAPISpecParser().parse_file(document.file)
+            document.title = result['title'] or document.title
+            document.spec_version = result['spec_version']
+            document.parsed_endpoints = result['endpoints']
+            document.status = 'parsed'
+            document.save(update_fields=[
+                'title', 'spec_version', 'parsed_endpoints', 'status', 'updated_at',
+            ])
+            return Response(result)
+        except OpenAPIParseError as exc:
+            document.status = 'failed'
+            document.save(update_fields=['status', 'updated_at'])
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception('Failed to parse OpenAPI document %s', document.id)
+            document.status = 'failed'
+            document.save(update_fields=['status', 'updated_at'])
+            return Response(
+                {'error': '解析失败，请确认文档格式和引用是否有效'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @action(detail=True, methods=['post'], url_path='import')
+    def import_document(self, request, pk=None):
+        document = self.get_object()
+        if document.status not in {'parsed', 'imported'}:
+            return Response({'error': '请先成功解析文档'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = ApiDocumentImportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            project_queryset = accessible_api_projects(request.user).filter(
+                id=data['project_id'],
+                project_type='HTTP',
+            )
+            project = project_queryset.distinct().get()
+        except ApiProject.DoesNotExist:
+            return Response({'error': '目标项目不存在或无权访问'}, status=status.HTTP_404_NOT_FOUND)
+        if project.id != document.project_id:
+            return Response({'error': '目标项目必须与上传文档所属项目一致'}, status=status.HTTP_400_BAD_REQUEST)
+
+        document.status = 'importing'
+        document.save(update_fields=['status', 'updated_at'])
+        try:
+            from .openapi_import import OpenAPIImporter, OpenAPIParseError
+
+            root_collection = ApiCollection.objects.filter(
+                id=document.collection_id,
+                project=project,
+            ).first() if document.collection_id else None
+            result = OpenAPIImporter.import_selected(
+                project=project,
+                endpoints=document.parsed_endpoints,
+                endpoint_keys=data['endpoint_keys'],
+                user=request.user,
+                document_title=document.title,
+                base_url=data.get('base_url', ''),
+                by_tag=data.get('by_tag', True),
+                duplicate_strategy=data.get('duplicate_strategy', 'skip'),
+                root_collection=root_collection,
+            )
+            document.status = 'imported'
+            document.imported_count = result['created_count'] + result['updated_count']
+            if result['collection_id']:
+                document.collection_id = result['collection_id']
+            document.save(update_fields=['status', 'imported_count', 'collection_id', 'updated_at'])
+            return Response(result, status=status.HTTP_201_CREATED)
+        except OpenAPIParseError as exc:
+            document.status = 'failed'
+            document.save(update_fields=['status', 'updated_at'])
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception('Failed to import OpenAPI document %s', document.id)
+            document.status = 'failed'
+            document.save(update_fields=['status', 'updated_at'])
+            return Response(
+                {'error': '导入失败，已回滚本次新增和更新'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )

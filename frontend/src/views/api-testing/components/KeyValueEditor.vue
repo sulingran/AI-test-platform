@@ -16,12 +16,16 @@
       >
         <div class="column key-column">
           <el-checkbox v-model="row.enabled" @change="updateValue" />
+          <span v-if="showRequired && row.required" class="required-mark" title="required">*</span>
           <el-input
             v-model="row.key"
             :placeholder="placeholderKey"
             size="small"
             @input="updateValue"
           />
+          <el-tag v-if="showType && row.param_type" size="small" :type="typeTagType(row.param_type)" class="type-tag">
+            {{ row.param_type }}
+          </el-tag>
         </div>
 
         <div class="column value-column">
@@ -152,7 +156,7 @@ const { t } = useI18n()
 
 const props = defineProps({
   modelValue: {
-    type: Object,
+    type: [Object, Array],
     default: () => ({})
   },
   placeholderKey: {
@@ -164,6 +168,14 @@ const props = defineProps({
     default: 'Value'
   },
   showFile: {
+    type: Boolean,
+    default: false
+  },
+  showType: {
+    type: Boolean,
+    default: false
+  },
+  showRequired: {
     type: Boolean,
     default: false
   }
@@ -349,6 +361,8 @@ const initializeRows = () => {
       value: item.value || '',
       description: item.description || '',
       type: item.type || 'text',
+      param_type: item.param_type || '',
+      required: Boolean(item.required),
       file: item.file || null
     })))
   } else {
@@ -362,6 +376,8 @@ const initializeRows = () => {
           value: data[key],
           description: '',
           type: 'text',
+          param_type: '',
+          required: false,
           file: null
         })
       }
@@ -376,6 +392,8 @@ const initializeRows = () => {
       value: '',
       description: '',
       type: 'text',
+      param_type: '',
+      required: false,
       file: null
     })
   }
@@ -391,7 +409,9 @@ const updateValue = () => {
     value: row.value || '',
     description: row.description || '',
     enabled: row.enabled !== false,
-    type: row.type || 'text'
+    type: row.type || 'text',
+    param_type: row.param_type || '',
+    required: Boolean(row.required)
   }))
   
   console.log('KeyValueEditor updateValue result (full format):', result)
@@ -411,6 +431,8 @@ const addRow = () => {
     value: '',
     description: '',
     type: 'text',
+    param_type: '',
+    required: false,
     file: null
   })
 }
@@ -420,6 +442,11 @@ const removeRow = (index) => {
     rows.value.splice(index, 1)
     updateValue()
   }
+}
+
+const typeTagType = (type) => {
+  const map = { string: '', integer: 'warning', number: 'warning', boolean: 'success', array: 'danger', object: 'danger' }
+  return map[type] || 'info'
 }
 
 const handleFileChange = (index, file) => {
@@ -608,6 +635,16 @@ defineExpose({
   font-size: 12px;
   color: #606266;
   margin-left: 8px;
+}
+
+.required-mark {
+  color: var(--el-color-danger);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.type-tag {
+  flex: none;
 }
 
 .footer {

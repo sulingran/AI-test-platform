@@ -32,6 +32,9 @@
             <el-button type="success" size="small" @click="createEmptyRequest" :title="$t('apiTesting.interface.addInterface')">
               <el-icon><Plus /></el-icon>
             </el-button>
+            <el-button size="small" @click="openImportOpenApi" :title="$t('apiTesting.importOpenApi.title')" :disabled="!selectedProject">
+              <el-icon><Upload /></el-icon>
+            </el-button>
           </div>
         </div>
 
@@ -220,6 +223,7 @@
                   <template #dropdown>
                     <el-dropdown-menu>
                       <el-dropdown-item @click="importCurl">{{ $t('apiTesting.interface.importCurl') }}</el-dropdown-item>
+                      <el-dropdown-item @click="openImportOpenApi">{{ $t('apiTesting.importOpenApi.title') }}</el-dropdown-item>
                       <el-dropdown-item @click="exportRequest">{{ $t('apiTesting.interface.exportCurl') }}</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
@@ -246,6 +250,18 @@
                 v-model="selectedRequest.params"
                 :placeholder-key="$t('apiTesting.interface.paramName')"
                 :placeholder-value="$t('apiTesting.interface.paramValue')"
+                :show-type="true"
+                :show-required="true"
+              />
+            </el-tab-pane>
+
+            <el-tab-pane v-if="hasPathParams" :label="$t('apiTesting.interface.pathParams')" name="pathParams">
+              <KeyValueEditor
+                v-model="selectedRequest.path_params"
+                :placeholder-key="$t('apiTesting.interface.paramName')"
+                :placeholder-value="$t('apiTesting.interface.paramValue')"
+                :show-type="true"
+                :show-required="true"
               />
             </el-tab-pane>
 
@@ -255,6 +271,8 @@
                 v-model="selectedRequest.headers"
                 :placeholder-key="$t('apiTesting.interface.headerName')"
                 :placeholder-value="$t('apiTesting.interface.headerValue')"
+                :show-type="true"
+                :show-required="true"
                 @update:modelValue="onHeadersUpdate"
               />
             </el-tab-pane>
@@ -928,6 +946,13 @@
       </template>
     </el-dialog>
 
+    <ImportOpenApiDialog
+      v-model="showImportOpenApiDialog"
+      :projects="projects"
+      :initial-project-id="selectedProject"
+      @imported="onOpenApiImported"
+    />
+
     <!-- 代码生成对话框 -->
     <el-dialog
       v-model="showCodeGenerateDialog"
@@ -984,9 +1009,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Folder, Document, MagicStick, Search, Close, CopyDocument, Delete } from '@element-plus/icons-vue'
+import { Plus, Folder, Document, MagicStick, Search, Close, CopyDocument, Delete, Upload } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import KeyValueEditor from './components/KeyValueEditor.vue'
+import ImportOpenApiDialog from './components/ImportOpenApiDialog.vue'
 import DataFactorySelector from '@/components/DataFactorySelector.vue'
 import { RequestModelParser } from '@/utils/requestModel'
 import { getVariableFunctions } from '@/api/data-factory'
@@ -1049,6 +1075,7 @@ const loading = ref(false)
 // CURL导入相关
 const showCurlImportDialog = ref(false)
 const curlCommand = ref('')
+const showImportOpenApiDialog = ref(false)
 
 // 代码生成相关
 const showCodeGenerateDialog = ref(false)
@@ -1392,6 +1419,12 @@ const createEmptyRequest = () => {
     pre_request_script: '',
     post_request_script: '',
     assertions: [],
+    path_params: [],
+    request_schema: {},
+    response_schemas: {},
+    response_examples: {},
+    deprecated: false,
+    openapi_path: '',
     request_type: 'HTTP'
   }
 
@@ -1447,6 +1480,12 @@ const addRequest = () => {
     pre_request_script: '',
     post_request_script: '',
     assertions: [],
+    path_params: [],
+    request_schema: {},
+    response_schemas: {},
+    response_examples: {},
+    deprecated: false,
+    openapi_path: '',
     request_type: 'HTTP'
   }
 
@@ -1673,8 +1712,12 @@ const requestUrl = computed({
 })
 
 const hasBody = computed(() => {
-  return selectedRequest.value && selectedRequest.value.method && ['POST', 'PUT', 'PATCH'].includes(selectedRequest.value.method)
+  return selectedRequest.value && selectedRequest.value.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(selectedRequest.value.method)
 })
+
+const hasPathParams = computed(() => (
+  Array.isArray(selectedRequest.value?.path_params) && selectedRequest.value.path_params.length > 0
+))
 
 const responseBody = computed(() => {
   if (!response.value || !response.value.response_data) return ''
@@ -1805,6 +1848,7 @@ const sendRequest = async () => {
       url: selectedRequest.value.url,
       method: selectedRequest.value.method,
       params: convertKeyValueArrayToObject(selectedRequest.value.params || []),
+      path_params: selectedRequest.value.path_params || [],
       headers: selectedRequest.value.headers,
       environment_id: selectedEnvironment.value
     }
@@ -1924,7 +1968,7 @@ const saveRequest = async () => {
 
     const requestData = {
       ...selectedRequest.value,
-      params: Array.isArray(selectedRequest.value.params) ? convertKeyValueArrayToObject(selectedRequest.value.params || []) : selectedRequest.value.params,
+      params: selectedRequest.value.params,
       headers: finalHeaders
     }
     
@@ -2147,6 +2191,19 @@ const importCurl = () => {
   // 清空上次的 curl 命令
   curlCommand.value = ''
   showCurlImportDialog.value = true
+}
+
+const openImportOpenApi = () => {
+  if (!selectedProject.value) {
+    ElMessage.warning(t('apiTesting.messages.warning.pleaseSelectProject'))
+    return
+  }
+  showImportOpenApiDialog.value = true
+}
+
+const onOpenApiImported = async () => {
+  selectedRequest.value = null
+  await loadCollections(selectedProject.value)
 }
 
 const parseAndImportCurl = async () => {

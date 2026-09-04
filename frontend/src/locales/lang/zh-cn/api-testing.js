@@ -220,6 +220,7 @@ export default {
     // Body 类型
     paramName: '参数名',
     paramValue: '参数值',
+    pathParams: '路径参数',
     headerName: 'Header名',
     headerValue: 'Header值',
     key: '键',
@@ -293,6 +294,33 @@ export default {
     // 其他
     newRequest: '新建请求',
     assertion: '断言'
+  },
+
+  // OpenAPI 导入
+  importOpenApi: {
+    title: '导入 OpenAPI/Swagger',
+    uploadFile: '上传文件',
+    pasteText: '粘贴文本',
+    dragOrClick: '点击或拖拽文档到此区域',
+    pastePlaceholder: '请粘贴 OpenAPI/Swagger 的 JSON 或 YAML 内容',
+    maxFileSize: '最大 5 MB',
+    fileTooLarge: '文件不能超过 5 MB',
+    targetProject: '目标项目',
+    selectProject: '请选择 HTTP 项目',
+    parse: '解析并预览',
+    parseSuccess: '文档解析成功',
+    parseFailed: '解析失败',
+    selectAll: '全选',
+    selectedCount: '已选 {count} 个',
+    endpoints: '个接口',
+    import: '导入选中接口',
+    importFailed: '导入失败',
+    byTag: '按 Tag 创建子集合',
+    duplicateStrategy: '重复接口',
+    skipDuplicates: '跳过',
+    updateDuplicates: '更新契约',
+    updateWarning: '更新只覆盖接口契约字段，原有断言和前后置脚本会保留。',
+    result: '导入完成：新增 {created}，更新 {updated}，跳过 {skipped}'
   },
 
   // 自动化测试

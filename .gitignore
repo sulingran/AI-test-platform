@@ -23,6 +23,8 @@ static_files/img/
 apps/*/migrations/*
 # 使用否定模式，例外地跟踪 __init__.py 文件
 !apps/*/migrations/__init__.py
+!apps/ai/migrations/
+!apps/ai/migrations/*.py
 
 # 忽略 allure-static 下的所有文件（运行时生成）
 media/allure-static/*
@@ -51,6 +53,9 @@ media/api-testing/allure-reports/*
 !media/api-testing/allure-reports/.gitkeep
 media/api-testing/allure-static/*
 !media/api-testing/allure-static/.gitkeep
+
+# OpenAPI/Swagger uploads may contain private endpoints or examples
+media/api_docs/
 
 # 忽略 APP 自动化运行时产生的文件，但保留.gitkeep文件
 media/app-automation/allure-results/*
@@ -81,6 +86,13 @@ Dockerfile*
 docker-compose*.yml
 .dockerignore
 nginx.conf
+!docker-compose.yml
+!.docker_env.example
+!.dockerignore
+!backend/Dockerfile
+!backend/entrypoint.sh
+!backend/scheduler-loop.sh
+!deploy/nginx.conf
 Makefile
 build-multiplatform.sh
 

@@ -8,6 +8,7 @@ import asyncio
 from typing import Dict, Any, List, AsyncIterator
 from asgiref.sync import sync_to_async
 import logging
+from apps.ai.client import AIClient
 
 logger = logging.getLogger(__name__)
 
@@ -1359,3 +1360,31 @@ class AIModelService:
         logger.info(f"重新编号完成: 共{total_cases}条测试用例，编号范围: {prefix}001-{prefix}{total_cases:03d}")
 
         return renumbered_content
+
+
+# Keep the long-standing AIModelService API stable while routing transport
+# through the shared gateway. The original implementations remain above as a
+# readable fallback during the migration and for downstream integrations that
+# still import helper methods from this module.
+async def _gateway_chat(config, messages, max_tokens=None):
+    return await AIClient.chat(config, messages, max_tokens=max_tokens, scenario="requirement_analysis")
+
+
+async def _gateway_stream(config, messages, callback=None, max_tokens=None):
+    async for chunk in AIClient.chat_stream(
+        config,
+        messages,
+        callback=callback,
+        max_tokens=max_tokens,
+        scenario="requirement_analysis",
+    ):
+        yield chunk
+
+
+async def _gateway_list_models(config):
+    return await AIClient.list_models(config, scenario="requirement_analysis")
+
+
+AIModelService.call_openai_compatible_api = staticmethod(_gateway_chat)
+AIModelService.call_openai_compatible_api_stream = staticmethod(_gateway_stream)
+AIModelService.list_available_models = staticmethod(_gateway_list_models)

@@ -77,6 +77,7 @@ class ApiRequest(models.Model):
         ('PATCH', 'PATCH'),
         ('HEAD', 'HEAD'),
         ('OPTIONS', 'OPTIONS'),
+        ('TRACE', 'TRACE'),
     ]
 
     collection = models.ForeignKey(ApiCollection, on_delete=models.CASCADE, null=True, blank=True,
@@ -94,6 +95,12 @@ class ApiRequest(models.Model):
     pre_request_script = models.TextField(blank=True, verbose_name='请求前脚本')
     post_request_script = models.TextField(blank=True, verbose_name='请求后脚本')
     assertions = models.JSONField(default=list, verbose_name='断言规则')
+    request_schema = models.JSONField(default=dict, verbose_name='请求体Schema')
+    response_schemas = models.JSONField(default=dict, verbose_name='响应Schema')
+    path_params = models.JSONField(default=list, verbose_name='路径参数')
+    response_examples = models.JSONField(default=dict, verbose_name='响应示例')
+    deprecated = models.BooleanField(default=False, verbose_name='是否已废弃')
+    openapi_path = models.CharField(max_length=1000, blank=True, default='', verbose_name='OpenAPI原始路径')
     order = models.IntegerField(default=0, verbose_name='排序')
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='创建者')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
@@ -636,3 +643,64 @@ class AIServiceConfig(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ApiDocument(models.Model):
+    """Uploaded OpenAPI/Swagger document and its sanitized parse result."""
+
+    DOCUMENT_TYPE_CHOICES = [
+        ('json', 'JSON'),
+        ('yaml', 'YAML'),
+    ]
+    SPEC_VERSION_CHOICES = [
+        ('swagger_2.0', 'Swagger 2.0'),
+        ('openapi_3.0', 'OpenAPI 3.0'),
+        ('openapi_3.1', 'OpenAPI 3.1'),
+    ]
+    STATUS_CHOICES = [
+        ('uploaded', '已上传'),
+        ('parsing', '解析中'),
+        ('parsed', '解析完成'),
+        ('importing', '导入中'),
+        ('imported', '导入完成'),
+        ('failed', '失败'),
+    ]
+
+    title = models.CharField(max_length=200, verbose_name='文档标题')
+    file = models.FileField(upload_to='api_docs/%Y/%m/', verbose_name='文档文件')
+    document_type = models.CharField(max_length=10, choices=DOCUMENT_TYPE_CHOICES, verbose_name='文档类型')
+    spec_version = models.CharField(
+        max_length=20,
+        choices=SPEC_VERSION_CHOICES,
+        null=True,
+        blank=True,
+        verbose_name='规范版本',
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded', verbose_name='状态')
+    parsed_endpoints = models.JSONField(default=list, verbose_name='已脱敏的端点列表')
+    file_size = models.PositiveIntegerField(null=True, blank=True, verbose_name='文件大小(bytes)')
+    imported_count = models.IntegerField(default=0, verbose_name='最近导入数量')
+    collection_id = models.PositiveIntegerField(null=True, blank=True, verbose_name='导入根集合ID')
+    project = models.ForeignKey(
+        ApiProject,
+        on_delete=models.CASCADE,
+        related_name='api_documents',
+        verbose_name='关联项目',
+    )
+    uploaded_by = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='uploaded_api_docs',
+        verbose_name='上传者',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'api_documents'
+        verbose_name = 'API文档'
+        verbose_name_plural = 'API文档'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.title} - {self.get_status_display()}'

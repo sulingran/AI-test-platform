@@ -217,6 +217,7 @@ export default {
     example: 'Example',
     operation: 'Operation',
     insert: 'Insert',
+    pathParams: 'Path Parameters',
     // WebSocket
     messageType: 'Select message type',
     inputWebSocketMessage: 'Enter WebSocket message content to send',
@@ -281,6 +282,33 @@ export default {
     // Others
     newRequest: 'New Request',
     assertion: 'Assertion'
+  },
+
+  // OpenAPI Import
+  importOpenApi: {
+    title: 'Import OpenAPI/Swagger',
+    uploadFile: 'Upload File',
+    pasteText: 'Paste Text',
+    dragOrClick: 'Click or drag an API document here',
+    pastePlaceholder: 'Paste OpenAPI/Swagger JSON or YAML content',
+    maxFileSize: '5 MB maximum',
+    fileTooLarge: 'The file cannot exceed 5 MB',
+    targetProject: 'Target Project',
+    selectProject: 'Select an HTTP project',
+    parse: 'Parse and Preview',
+    parseSuccess: 'Document parsed successfully',
+    parseFailed: 'Parse failed',
+    selectAll: 'Select All',
+    selectedCount: '{count} selected',
+    endpoints: 'endpoints',
+    import: 'Import Selected',
+    importFailed: 'Import failed',
+    byTag: 'Create sub-collections by tag',
+    duplicateStrategy: 'Duplicates',
+    skipDuplicates: 'Skip',
+    updateDuplicates: 'Update Contract',
+    updateWarning: 'Only contract fields are updated. Existing assertions and scripts are preserved.',
+    result: 'Import complete: {created} created, {updated} updated, {skipped} skipped'
   },
 
   // Automation Testing

@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.utils import timezone
 from datetime import datetime
+from pathlib import Path
 
 
 class NullableDateField(serializers.DateField):
@@ -17,7 +19,9 @@ from .models import (
     RequestHistory, TestSuite, TestExecution, TestSuiteRequest,
     ScheduledTask, TaskExecutionLog, NotificationLog,
     TaskNotificationSetting, OperationLog, AIServiceConfig,
+    ApiDocument,
 )
+from .access import can_access_api_project
 
 User = get_user_model()
 
@@ -89,6 +93,17 @@ class ApiCollectionSerializer(serializers.ModelSerializer):
         children = obj.children.all()
         return ApiCollectionSerializer(children, many=True).data
 
+    def validate(self, attrs):
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        parent = attrs.get('parent', getattr(self.instance, 'parent', None))
+        user = self.context['request'].user
+
+        if not project or not can_access_api_project(user, project):
+            raise serializers.ValidationError({'project': '无权访问该项目'})
+        if parent and parent.project_id != project.id:
+            raise serializers.ValidationError({'parent': '父级集合必须属于同一项目'})
+        return attrs
+
 
 class ApiRequestSerializer(serializers.ModelSerializer):
     created_by = UserSerializer(read_only=True)
@@ -103,10 +118,20 @@ class ApiRequestSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'request_type', 'method', 'url',
             'headers', 'params', 'body', 'auth', 'pre_request_script',
-            'post_request_script', 'assertions', 'collection', 'order', 'created_by',
+            'post_request_script', 'assertions', 'request_schema', 'response_schemas',
+            'path_params', 'response_examples', 'deprecated', 'openapi_path',
+            'collection', 'order', 'created_by',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+    def validate_collection(self, collection):
+        if collection and not can_access_api_project(
+            self.context['request'].user,
+            collection.project,
+        ):
+            raise serializers.ValidationError('无权访问该集合所属项目')
+        return collection
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
@@ -120,6 +145,76 @@ class ApiRequestSerializer(serializers.ModelSerializer):
                 validated_data['request_type'] = 'HTTP'
 
         return super().create(validated_data)
+
+
+class ApiDocumentUploadSerializer(serializers.ModelSerializer):
+    title = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
+    class Meta:
+        model = ApiDocument
+        fields = ['id', 'title', 'file', 'project']
+        read_only_fields = ['id']
+
+    def validate_file(self, value):
+        max_size = getattr(settings, 'OPENAPI_IMPORT_MAX_BYTES', 5 * 1024 * 1024)
+        if value.size > max_size:
+            raise serializers.ValidationError(f'文件不能超过 {max_size // (1024 * 1024)} MB')
+        if Path(value.name).suffix.lower() not in {'.json', '.yaml', '.yml'}:
+            raise serializers.ValidationError('仅支持 .json、.yaml、.yml 文件')
+        return value
+
+    def validate_project(self, project):
+        user = self.context['request'].user
+        if not can_access_api_project(user, project):
+            raise serializers.ValidationError('无权向该项目导入接口')
+        if project.project_type != 'HTTP':
+            raise serializers.ValidationError('OpenAPI 文档只能导入到 HTTP 项目')
+        return project
+
+    def create(self, validated_data):
+        uploaded_file = validated_data['file']
+        validated_data['uploaded_by'] = self.context['request'].user
+        validated_data['title'] = validated_data.get('title') or Path(uploaded_file.name).stem
+        validated_data['document_type'] = (
+            'json' if Path(uploaded_file.name).suffix.lower() == '.json' else 'yaml'
+        )
+        validated_data['file_size'] = uploaded_file.size
+        return super().create(validated_data)
+
+
+class ApiDocumentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.CharField(source='uploaded_by.username', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+
+    class Meta:
+        model = ApiDocument
+        fields = [
+            'id', 'title', 'document_type', 'spec_version', 'status', 'file_size',
+            'imported_count', 'project', 'project_name', 'uploaded_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class ApiDocumentImportSerializer(serializers.Serializer):
+    project_id = serializers.IntegerField(min_value=1)
+    endpoint_keys = serializers.ListField(
+        child=serializers.CharField(max_length=1200),
+        allow_empty=False,
+        max_length=5000,
+    )
+    base_url = serializers.CharField(required=False, allow_blank=True, default='', max_length=2000)
+    by_tag = serializers.BooleanField(required=False, default=True)
+    duplicate_strategy = serializers.ChoiceField(
+        choices=('skip', 'update'),
+        required=False,
+        default='skip',
+    )
+
+    def validate_endpoint_keys(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError('端点列表中存在重复项')
+        return value
 
 
 class EnvironmentSerializer(serializers.ModelSerializer):
@@ -140,10 +235,18 @@ class EnvironmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'project_name']
 
     def validate(self, attrs):
-        if attrs.get('scope') == 'GLOBAL':
+        scope = attrs.get('scope', getattr(self.instance, 'scope', None))
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+
+        if scope == 'GLOBAL':
             attrs['project'] = None
-        elif attrs.get('scope') == 'LOCAL' and not attrs.get('project'):
+        elif scope == 'LOCAL' and not project:
             raise serializers.ValidationError({'project': '局部环境变量必须关联项目'})
+        elif scope == 'LOCAL' and not can_access_api_project(
+            self.context['request'].user,
+            project,
+        ):
+            raise serializers.ValidationError({'project': '无权访问该项目'})
         return attrs
 
     def to_representation(self, instance):

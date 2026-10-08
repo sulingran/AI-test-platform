@@ -223,8 +223,12 @@ export default {
     adoptAll: 'Adopt All',
     exportExcel: 'Export',
     delete: 'Delete',
-    batchAdopt: 'Batch Adopt',
-    batchDiscard: 'Batch Discard',
+    requirementName: 'Requirement Name',
+    noCasesToExport: 'No test cases to export for this task',
+    exportSheetName: 'Test Cases',
+    exportFileName: 'GeneratedTestCases_{taskId}_{date}.xlsx',
+    batchAdopt: 'Adopt',
+    batchDiscard: 'Discard',
 
     // Empty State
     noTasks: 'No Tasks',

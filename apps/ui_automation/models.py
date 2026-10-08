@@ -1057,3 +1057,296 @@ class AIExecutionRecord(models.Model):
 
     def __str__(self):
         return f"{self.case_name} - {self.get_status_display()}"
+
+
+class LocatorMemory(models.Model):
+    """定位器记忆库：按 页面URL + 元素语义 建索引，沉淀 AI 识别到的元素定位器。
+
+    用于「智能元素定位与自愈」——第一次 AI 识别到元素后落库，后续执行按语义命中复用；
+    定位器失效时按 embedding 召回候选以便自愈。
+    """
+    STRATEGY_CHOICES = [
+        ('css', 'CSS选择器'),
+        ('xpath', 'XPath'),
+        ('text', '文本'),
+        ('placeholder', '占位符'),
+        ('id', 'ID'),
+        ('name', 'name属性'),
+        ('role', 'ARIA role'),
+        ('label', 'label'),
+        ('test-id', 'test-id'),
+    ]
+
+    project = models.ForeignKey(UiProject, on_delete=models.CASCADE, null=True, blank=True, verbose_name='所属项目')
+    source_record = models.ForeignKey(AIExecutionRecord, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='来源执行记录')
+
+    page_url = models.CharField(max_length=500, verbose_name='页面URL(归一化)')
+    semantic_key = models.CharField(max_length=200, verbose_name='元素语义签名')
+    semantic_text = models.TextField(blank=True, default='', verbose_name='语义文本')
+    node_name = models.CharField(max_length=100, blank=True, default='', verbose_name='标签名')
+
+    locator_strategy = models.CharField(max_length=50, choices=STRATEGY_CHOICES, blank=True, default='', verbose_name='定位策略')
+    locator_value = models.CharField(max_length=500, blank=True, default='', verbose_name='定位表达式')
+
+    attributes = models.JSONField(default=dict, blank=True, verbose_name='属性快照')
+    element_hash = models.CharField(max_length=200, blank=True, default='', verbose_name='browser-use语义哈希')
+    embedding = models.JSONField(default=list, blank=True, verbose_name='语义向量')
+
+    confidence = models.FloatField(default=1.0, verbose_name='置信度')
+    hit_count = models.IntegerField(default=0, verbose_name='命中次数')
+    last_hit_at = models.DateTimeField(null=True, blank=True, verbose_name='最后命中时间')
+    last_seen_at = models.DateTimeField(null=True, blank=True, verbose_name='最后观察时间')
+    is_valid = models.BooleanField(default=True, verbose_name='是否有效')
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ui_locator_memory'
+        verbose_name = '定位器记忆'
+        verbose_name_plural = '定位器记忆'
+        ordering = ['-hit_count', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(fields=['page_url', 'semantic_key'], name='uniq_locator_url_semantic'),
+        ]
+        indexes = [
+            models.Index(fields=['page_url', 'semantic_key']),
+            models.Index(fields=['is_valid']),
+        ]
+
+    def __str__(self):
+        label = self.semantic_text or self.locator_value or self.node_name or '?'
+        return f'{label[:30]} @ {self.page_url[:50]}'
+
+    @staticmethod
+    def normalize_url(url):
+        """归一化 URL：去掉 query 与 fragment，避免动态参数导致记忆库碎片化。"""
+        from urllib.parse import urlsplit, urlunsplit
+        if not url:
+            return ''
+        try:
+            parts = urlsplit(url)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+        except Exception:
+            return (url or '').split('?')[0].split('#')[0]
+
+    @staticmethod
+    def make_semantic_key(node_name, semantic_text):
+        """稳定、跨进程的语义签名（browser-use 的 element_hash 用的是 Python hash，不稳定）。"""
+        import hashlib
+        raw = f"{node_name or ''}|{semantic_text or ''}".strip()
+        if not raw.strip('|'):
+            return ''
+        return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
+
+    @staticmethod
+    def _cosine(a, b):
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    @classmethod
+    def recall(cls, page_url, semantic_key):
+        """按 页面URL + 语义签名 精确命中，命中则计数 +1。"""
+        memory = cls.objects.filter(
+            page_url=page_url, semantic_key=semantic_key, is_valid=True
+        ).first()
+        if memory:
+            memory.hit_count += 1
+            memory.last_hit_at = timezone.now()
+            memory.save(update_fields=['hit_count', 'last_hit_at'])
+        return memory
+
+    @classmethod
+    def recall_by_embedding(cls, embedding, page_url=None, top_k=5):
+        """按语义向量余弦相似度召回 Top-K 候选（内存计算，数据量小够用）。"""
+        queryset = cls.objects.filter(is_valid=True)
+        if page_url:
+            queryset = queryset.filter(page_url=page_url)
+        scored = []
+        for memory in queryset.only(
+            'id', 'page_url', 'semantic_key', 'semantic_text',
+            'locator_strategy', 'locator_value', 'embedding',
+        ):
+            vec = memory.embedding or []
+            if not vec:
+                continue
+            scored.append((cls._cosine(embedding, vec), memory))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[:top_k]
+
+    # ============ 第二期：定位器复用 + 自愈 ============
+
+    # 中英对照词表（被测系统有中英文两套界面，跨语言对齐语义）
+    _SEMANTIC_MAP = {
+        '账号': ['account'],
+        '用户名': ['username', 'user'],
+        '密码': ['password', 'passwd', 'pwd'],
+        '登录': ['login', 'signin', 'sign_in'],
+        '提交': ['submit'],
+        '保存': ['save'],
+        '确定': ['ok', 'confirm'],
+        '取消': ['cancel'],
+        '搜索': ['search', 'query'],
+        '邮箱': ['email', 'mail'],
+        '手机': ['phone', 'mobile', 'tel'],
+        '验证码': ['captcha', 'code', 'verify'],
+        '记住': ['remember'],
+        '忘记': ['forgot'],
+        '重置': ['reset'],
+        '注册': ['register', 'signup'],
+        '退出': ['logout', 'signout'],
+    }
+
+    # 中文元素类型提示 → 标签名（仅作 tie-break，不作主要匹配依据）
+    _TAG_HINTS = {
+        'input': ['输入', '账号', '用户名', '密码', '邮箱', '框', '文本框', '手机', '验证码'],
+        'textarea': ['文本域', '多行', '备注', '描述', '内容'],
+        'button': ['按钮', '提交', '保存', '确定', '登录'],
+        'select': ['下拉', '选择'],
+        'a': ['链接', '详情'],
+    }
+
+    @classmethod
+    def _norm_text(cls, s):
+        import unicodedata
+        import string as _string
+        s = unicodedata.normalize('NFKC', str(s or ''))
+        punct = _string.punctuation + '，。！？；：「」『』（）【】、·～—…“”‘’《》〈〉'
+        return ''.join(ch for ch in s.lower() if ch not in punct and not ch.isspace())
+
+    @staticmethod
+    def _bigrams(s):
+        return set(s[i:i + 2] for i in range(len(s) - 1)) if len(s) > 1 else {s}
+
+    @classmethod
+    def _slot_ids(cls, s):
+        """返回 s 命中的语义槽集合（跨语言：中文词子串命中 / 英文词命中同一槽）。"""
+        sn = cls._norm_text(s)
+        ids = set()
+        for slot, (zh, ens) in enumerate(cls._SEMANTIC_MAP.items()):
+            zhn = cls._norm_text(zh)
+            if zhn and zhn in sn:
+                ids.add(slot)
+            for en in ens:
+                enn = cls._norm_text(en)
+                if enn and enn in sn:
+                    ids.add(slot)
+        return ids
+
+    @classmethod
+    def _is_cjk(cls, s):
+        return any('一' <= ch <= '鿿' for ch in s)
+
+    @classmethod
+    def _sim(cls, a, b):
+        """语义相似度分层：精确 > 跨语言等价 > 子串 > 字符相似 + bigram-jaccard。"""
+        a, b = cls._norm_text(a), cls._norm_text(b)
+        if not a or not b:
+            return 0.0
+        # ① 精确相等（含大小写归一后相同）
+        if a == b:
+            return 1.0
+        # ② 跨语言等价命中：共同语义槽 + 分属中英文（账号↔account）
+        sa, sb = cls._slot_ids(a), cls._slot_ids(b)
+        if sa and sb and sa & sb and (cls._is_cjk(a) != cls._is_cjk(b)):
+            return 0.85
+        # ③ 子串按长度占比折算
+        if a in b or b in a:
+            return 0.60 + 0.40 * min(len(a), len(b)) / max(len(a), len(b))
+        # ④ 字符相似 + bigram-jaccard（CJK 靠后者兜底）
+        from difflib import SequenceMatcher
+        sm = SequenceMatcher(None, a, b).ratio()
+        ba, bb = cls._bigrams(a), cls._bigrams(b)
+        jac = len(ba & bb) / len(ba | bb) if (ba or bb) else 0.0
+        return min(0.99, 0.65 * sm + 0.35 * jac)
+
+    @classmethod
+    def fuzzy_match(cls, semantic, page_url=None, top_k=8, min_score=0.52):
+        """按语义模糊匹配召回记忆，返回 [(score, memory), ...]，score 降序。"""
+        q = cls._norm_text(semantic)
+        if not q:
+            return []
+        qs = cls.objects.filter(is_valid=True).order_by('-hit_count', '-updated_at')
+        if page_url:
+            qs = qs.filter(page_url=page_url)
+
+        scored = []
+        for m in qs.only('id', 'page_url', 'semantic_key', 'semantic_text',
+                         'node_name', 'attributes', 'locator_value', 'locator_strategy'):
+            fields = [m.semantic_text, m.node_name]
+            attrs = m.attributes or {}
+            for k in ('value', 'aria-label', 'title', 'placeholder', 'alt', 'name', 'id', 'type'):
+                v = attrs.get(k)
+                if v:
+                    fields.append(str(v))
+            best = max((cls._sim(q, f) for f in fields), default=0.0)
+            # 中文元素类型提示 tie-break
+            node = (m.node_name or '').lower()
+            for tag, hints in cls._TAG_HINTS.items():
+                if node and node.startswith(tag[:3]) and any(cls._norm_text(h) in q for h in hints):
+                    best = max(best, min(0.9, best + 0.08))
+                    break
+            if best >= min_score:
+                scored.append((best, m))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[:top_k]
+
+    @staticmethod
+    def build_xpath_from_attributes(memory):
+        """从 attributes 按 id>name>placeholder>aria-label>title 重建标准 XPath（自愈备选）。"""
+        attrs = memory.attributes or {}
+        tag = (memory.node_name or 'input').lower()
+        out = []
+
+        def lit(v):
+            v = str(v)
+            if '"' not in v:
+                return f'"{v}"'
+            return "concat('" + v.replace("'", "',\"'\",'") + "')"
+
+        for k in ('id', 'name', 'placeholder', 'aria-label', 'title'):
+            v = attrs.get(k)
+            if v:
+                out.append(f"//{tag}[@{k}={lit(v)}]")
+        return out
+
+    @classmethod
+    def record_hit(cls, memory_id):
+        m = cls.objects.filter(pk=memory_id).first()
+        if not m:
+            return
+        m.hit_count = (m.hit_count or 0) + 1
+        m.last_hit_at = timezone.now()
+        m.last_seen_at = timezone.now()
+        m.is_valid = True
+        m.save(update_fields=['hit_count', 'last_hit_at', 'last_seen_at', 'is_valid'])
+
+    @classmethod
+    def record_miss(cls, memory_id, decay=0.25):
+        """置信度衰减，而非立即失效（防 loading 态误伤）；连续 miss 归零转 is_valid=False。"""
+        m = cls.objects.filter(pk=memory_id).first()
+        if not m:
+            return
+        m.confidence = max(0.0, (m.confidence if m.confidence is not None else 1.0) - decay)
+        m.last_seen_at = timezone.now()
+        if m.confidence <= 0:
+            m.is_valid = False
+        m.save(update_fields=['confidence', 'last_seen_at', 'is_valid'])
+
+    @classmethod
+    def heal(cls, memory_id, new_xpath):
+        m = cls.objects.filter(pk=memory_id).first()
+        if not m:
+            return
+        m.locator_value = new_xpath
+        m.confidence = min(1.0, (m.confidence if m.confidence is not None else 1.0) + 0.1)
+        m.is_valid = True
+        m.last_seen_at = timezone.now()
+        m.save(update_fields=['locator_value', 'confidence', 'is_valid', 'last_seen_at'])

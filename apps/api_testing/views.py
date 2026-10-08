@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.http import HttpResponse, FileResponse, Http404, HttpResponseNotFound
 from django.views.static import serve
@@ -44,13 +44,15 @@ logger = logging.getLogger(__name__)
 from .utils import (
     _params_to_dict, _replace_path_params, execute_assertions,
     prepare_request_body, request_body_kwargs, ssl_verify_for,
+    execute_test_suite,
+    _is_token_expired, _refresh_env_token, _apply_refreshed_token,
 )
 from .operation_logger import log_operation
 from .access import accessible_api_projects, accessible_environments
 from .variable_resolver import VariableResolver
 from apps.core.real_env_token import (
     decode_jwt_exp,
-    fetch_real_env_token,
+    fetch_real_env_token_detail,
     write_token_to_environment,
 )
 from .serializers import (
@@ -434,7 +436,8 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                 request_body, request_method, variables, resolver,
             )
             
-            # 执行请求
+            # 执行请求（token 失效时自动刷新并重试一次）
+            token_refreshed = False
             start_time = time.time()
 
             response = requests.request(
@@ -446,8 +449,20 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
                 verify=verify_ssl,
                 **request_body_kwargs(body_type, body_data),
             )
+            if _is_token_expired(response) and _refresh_env_token(environment):
+                token_refreshed = True
+                _apply_refreshed_token(headers, environment)
+                response = requests.request(
+                    method=request_method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    timeout=30,
+                    verify=verify_ssl,
+                    **request_body_kwargs(body_type, body_data),
+                )
             end_time = time.time()
-            
+
             response_time = (end_time - start_time) * 1000  # 转换为毫秒
             
             # 执行断言验证
@@ -490,7 +505,8 @@ class ApiRequestViewSet(viewsets.ModelViewSet):
             # 返回包含断言结果的数据
             history_data = RequestHistorySerializer(history).data
             history_data['assertions_results'] = assertions_results
-            
+            history_data['token_refreshed'] = token_refreshed
+
             return Response(history_data)
             
         except Exception as e:
@@ -583,9 +599,12 @@ class EnvironmentViewSet(viewsets.ModelViewSet):
     def refresh_token(self, request, pk=None):
         """一键登录真实环境获取新 token，写入该环境的 token 变量"""
         environment = self.get_object()
-        token = fetch_real_env_token()
+        token, err = fetch_real_env_token_detail()
         if not token:
-            return Response({'error': '登录真实环境失败'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': err or '登录真实环境失败'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         write_token_to_environment(environment, token)
         log_operation(
             operation_type='edit',
@@ -691,7 +710,7 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
     def execute(self, request, pk=None):
         """执行测试套件"""
         test_suite = self.get_object()
-        
+
         try:
             # 创建执行记录
             execution = TestExecution.objects.create(
@@ -700,168 +719,12 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                 start_time=timezone.now(),
                 executed_by=request.user
             )
-            
-            # 获取套件中的请求
-            suite_requests = TestSuiteRequest.objects.filter(
-                test_suite=test_suite,
-                enabled=True
-            ).order_by('order')
-            
-            execution.total_requests = suite_requests.count()
-            execution.save()
-            
-            results = []
-            passed_count = 0
-            failed_count = 0
-            
-            # 创建变量解析器
-            resolver = VariableResolver()
 
-            # 执行每个请求
-            for suite_request in suite_requests:
-                api_request = suite_request.request
-                
-                try:
-                    # 解析环境变量
-                    variables = {}
-                    if test_suite.environment:
-                        variables.update(test_suite.environment.variables)
-                    
-                    # 替换URL中的变量（先解析动态函数，再替换环境变量）
-                    url = self._replace_variables(api_request.url, variables)
-                    url = resolver.resolve(url)
-                    url = _replace_path_params(
-                        url, getattr(api_request, 'path_params', None), variables, resolver,
-                    )
+            # 复用统一执行引擎（含 extract_vars 步骤间数据传递），
+            # 前端单套件「运行」、批量执行、定时任务三条路都走这里
+            execute_test_suite(test_suite, test_suite.environment, request.user, execution=execution)
+            execution.refresh_from_db()
 
-                    # 准备请求头
-                    headers = {}
-                    # 支持新的数组格式和旧的对象格式
-                    if isinstance(api_request.headers, list):
-                        # 新的数组格式 [{"key": "Authorization", "value": "Bearer {{token}}", "enabled": true, "description": "..."}]
-                        for header_item in api_request.headers:
-                            if header_item.get('enabled', True) and header_item.get('key'):
-                                key = header_item['key']
-                                value = self._replace_variables(str(header_item.get('value', '')), variables)
-                                value = resolver.resolve(value)
-                                headers[key] = value
-                    else:
-                        # 旧的对象格式 {"Authorization": "Bearer {{token}}"}
-                        headers = api_request.headers.copy()
-                        for key, value in headers.items():
-                            headers[key] = self._replace_variables(str(value), variables)
-                            headers[key] = resolver.resolve(headers[key])
-
-                    params = _params_to_dict(api_request.params)
-                    for key, value in params.items():
-                        params[key] = self._replace_variables(str(value), variables)
-                        params[key] = resolver.resolve(params[key])
-
-                    body_type, body_data = prepare_request_body(
-                        api_request.body, api_request.method, variables, resolver,
-                    )
-
-                    # 执行请求
-                    start_time = time.time()
-                    response = requests.request(
-                        method=api_request.method,
-                        url=url,
-                        headers=headers,
-                        params=params,
-                        timeout=30,
-                        **request_body_kwargs(body_type, body_data),
-                    )
-                    end_time = time.time()
-                    response_time = (end_time - start_time) * 1000
-                    
-                    # 执行断言验证
-                    assertions = api_request.assertions or []
-                    # 添加响应时间到断言中
-                    for assertion in assertions:
-                        if assertion.get('type') == 'response_time':
-                            assertion['actual_time'] = response_time
-                    
-                    # 使用共享的断言执行方法
-                    assertions_results = execute_assertions(response, assertions)
-                    
-                    # 检查所有断言是否通过
-                    passed = True
-                    error_message = ''
-                    
-                    # 检查套件请求的断言
-                    for assertion in suite_request.assertions:
-                        # 简单的状态码断言
-                        if assertion.get('type') == 'status_code':
-                            expected = assertion.get('value')
-                            if response.status_code != expected:
-                                passed = False
-                                error_message = f'状态码断言失败: 期望 {expected}, 实际 {response.status_code}'
-                                break
-                    
-                    # 检查接口自身的断言
-                    if passed and assertions_results:
-                        for assertion_result in assertions_results:
-                            if not assertion_result.get('passed', True):
-                                passed = False
-                                error_message = f"断言失败: {assertion_result.get('name', '未命名断言')} - {assertion_result.get('error', '断言不通过')}"
-                                break
-                    
-                    if passed:
-                        passed_count += 1
-                    else:
-                        failed_count += 1
-                    
-                    results.append({
-                        'name': api_request.name,
-                        'method': api_request.method,
-                        'url': url,
-                        'status_code': response.status_code,
-                        'response_time': response_time,
-                        'passed': passed,
-                        'error': error_message,
-                        'assertions_results': assertions_results
-                    })
-                    
-                    # 保存请求历史
-                    RequestHistory.objects.create(
-                        request=api_request,
-                        environment=test_suite.environment,
-                        request_data={
-                            'url': url,
-                            'method': api_request.method,
-                            'headers': headers,
-                            'params': params,
-                            'body': body_data
-                        },
-                        response_data={
-                            'headers': dict(response.headers),
-                            'body': response.text,
-                            'json': response.json() if response.headers.get('content-type', '').startswith('application/json') else None
-                        },
-                        status_code=response.status_code,
-                        response_time=response_time,
-                        assertions_results=assertions_results,
-                        executed_by=request.user
-                    )
-                    
-                except Exception as e:
-                    failed_count += 1
-                    results.append({
-                        'name': api_request.name,
-                        'method': api_request.method,
-                        'url': api_request.url,
-                        'passed': False,
-                        'error': str(e)
-                    })
-            
-            # 更新执行结果
-            execution.end_time = timezone.now()
-            execution.passed_requests = passed_count
-            execution.failed_requests = failed_count
-            execution.status = 'COMPLETED' if failed_count == 0 else 'FAILED'
-            execution.results = results
-            execution.save()
-            
             # 记录执行操作
             log_operation(
                 operation_type='execute',
@@ -870,13 +733,48 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                 resource_name=test_suite.name,
                 user=request.user
             )
-            
+
             return Response(TestExecutionSerializer(execution).data)
-            
+
         except Exception as e:
-            execution.status = 'FAILED'
-            execution.end_time = timezone.now()
-            execution.save()
+            try:
+                execution.status = 'FAILED'
+                execution.end_time = timezone.now()
+                execution.save()
+            except Exception:
+                pass
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='reorder-requests')
+    def reorder_requests(self, request, pk=None):
+        """按传入顺序重排套件内请求的 order（前端上移/下移后提交）。
+
+        请求体：{"ordered_ids": [<TestSuiteRequest.id>, ...]}
+        返回更新后的套件请求列表（含最新 order）。
+        """
+        test_suite = self.get_object()
+        ordered_ids = request.data.get('ordered_ids', [])
+
+        try:
+            current = list(
+                TestSuiteRequest.objects.filter(test_suite=test_suite).values_list('id', flat=True)
+            )
+            if set(ordered_ids) != set(current):
+                return Response(
+                    {'error': 'ordered_ids 与套件内请求不匹配'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            with transaction.atomic():
+                for order, tsr_id in enumerate(ordered_ids):
+                    TestSuiteRequest.objects.filter(id=tsr_id, test_suite=test_suite).update(order=order)
+
+            serializer = TestSuiteRequestSerializer(
+                TestSuiteRequest.objects.filter(test_suite=test_suite).order_by('order'),
+                many=True,
+            )
+            return Response({'message': '重排成功', 'suite_requests': serializer.data})
+        except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def perform_create(self, serializer):
@@ -932,10 +830,68 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                 )
             
             return Response({'message': '添加成功'})
-            
+
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
+
+    @action(detail=False, methods=['post'], url_path='batch-execute')
+    def batch_execute(self, request):
+        """批量执行多个测试套件（后台异步，立即返回）。
+
+        请求体：{"suite_ids": [1, 2, 3]}
+        立即为每个套件预建 PENDING 的 TestExecution 记录，返回其 id；
+        后台守护线程依次执行，前端轮询 test-executions 直到全部结束。
+        """
+        suite_ids = request.data.get('suite_ids', [])
+        if not suite_ids:
+            return Response({'error': '请选择至少一个套件'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 复用权限过滤，防止越权执行非本人项目的套件
+        suites = list(self.get_queryset().filter(id__in=suite_ids).order_by('id'))
+        if len(suites) != len(set(suite_ids)):
+            return Response({'error': '部分套件不存在或无权访问'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+
+        # 预建 PENDING 执行记录，前端立即拿到 execution_id 用于轮询
+        execution_objs = []
+        for suite in suites:
+            execution_objs.append(TestExecution.objects.create(
+                test_suite=suite,
+                status='PENDING',
+                executed_by=user
+            ))
+        executions = [
+            {
+                'execution_id': ex.id,
+                'suite_id': ex.test_suite_id,
+                'suite_name': ex.test_suite.name
+            }
+            for ex in execution_objs
+        ]
+
+        def run_batch():
+            from .utils import execute_test_suite
+            for execution in execution_objs:
+                suite = execution.test_suite
+                try:
+                    execute_test_suite(suite, suite.environment, user, execution=execution)
+                except Exception as e:
+                    logger.error(f"批量执行套件 {suite.id} 失败: {e}")
+                    execution.status = 'FAILED'
+                    execution.end_time = timezone.now()
+                    execution.save()
+
+        import threading
+        thread = threading.Thread(target=run_batch, daemon=True)
+        thread.start()
+
+        return Response({
+            'message': '批量执行已开始',
+            'suite_count': len(executions),
+            'executions': executions
+        })
+
     def _replace_variables(self, text, variables):
         """替换文本中的变量"""
         if not isinstance(text, str):
@@ -1445,6 +1401,145 @@ class TestExecutionViewSet(viewsets.ReadOnlyModelViewSet):
                 'detail': error_traceback
             }, status=status.HTTP_400_BAD_REQUEST)
     
+    @action(detail=False, methods=['post'], url_path='generate-batch-report')
+    def generate_batch_report(self, request):
+        """为多个执行记录生成一份合并的 HTML 报告。
+
+        请求体：{"execution_ids": [1, 2, 3]}
+        返回合并报告地址 report_url（summary.html）。
+        """
+        execution_ids = request.data.get('execution_ids', [])
+        if not execution_ids:
+            return Response({'error': '请至少提供一个执行记录'}, status=status.HTTP_400_BAD_REQUEST)
+
+        executions = list(self.get_queryset().filter(id__in=execution_ids).order_by('id'))
+        if not executions:
+            return Response({'error': '执行记录不存在或无权访问'}, status=status.HTTP_400_BAD_REQUEST)
+
+        report_output_dir = os.path.join(
+            settings.MEDIA_ROOT, 'api-testing', 'allure-reports', f'batch_{uuid.uuid4().hex[:8]}'
+        )
+        os.makedirs(report_output_dir, exist_ok=True)
+
+        html = self._build_batch_summary_html(executions)
+        summary_file = os.path.join(report_output_dir, 'summary.html')
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(html)
+
+        return Response({
+            'message': '合并报告生成成功',
+            'report_url': f'/media/api-testing/allure-reports/{os.path.basename(report_output_dir)}/summary.html'
+        })
+
+    def _build_batch_summary_html(self, executions):
+        """构建合并报告 summary.html（纯 HTML，无 Allure 依赖）。"""
+        total_suites = len(executions)
+        total_requests = sum(ex.total_requests or 0 for ex in executions)
+        total_passed = sum(ex.passed_requests or 0 for ex in executions)
+        total_failed = sum(ex.failed_requests or 0 for ex in executions)
+
+        # 顶部汇总卡片
+        suite_sections = []
+        for execution in executions:
+            status_class = "status-passed" if execution.status == "COMPLETED" else "status-failed"
+            results_html = ""
+            if execution.results:
+                for i, result in enumerate(execution.results):
+                    result_class = "passed" if result.get('passed', False) else "failed"
+                    method_class = f"method-{result.get('method', 'GET').lower()}"
+                    results_html += f"""
+            <div class="test-result-item {result_class}">
+                <div class="test-header">
+                    <span class="test-method {method_class}">{result.get('method', 'GET')}</span>
+                    <span class="test-name">{result.get('name', f'测试请求 {i+1}')}</span>
+                </div>
+                <div class="test-url">{result.get('url', '')}</div>
+                <div><strong>状态:</strong> {'通过' if result.get('passed', False) else '失败'}</div>
+                {f'<div class="test-error"><strong>错误:</strong> {result.get("error", "")}</div>' if result.get('error') else ""}
+            </div>
+"""
+            suite_sections.append(f"""
+        <div class="test-results">
+            <h2>套件: {execution.test_suite.name}</h2>
+            <div class="status-row">
+                <div class="status-badge {status_class}">状态: {execution.get_status_display()}</div>
+                <span class="execution-time">执行时间: {execution.created_at.strftime('%Y-%m-%d %H:%M:%S') if execution.created_at else 'N/A'}</span>
+            </div>
+            <div class="summary-grid">
+                <div class="summary-item total"><span class="summary-number">{execution.total_requests or 0}</span><span class="summary-label">总请求数</span></div>
+                <div class="summary-item passed"><span class="summary-number">{execution.passed_requests or 0}</span><span class="summary-label">通过数</span></div>
+                <div class="summary-item failed"><span class="summary-number">{execution.failed_requests or 0}</span><span class="summary-label">失败数</span></div>
+            </div>
+            {results_html or '<p>无结果数据</p>'}
+        </div>
+""")
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>合并测试报告</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; background-color: #f5f7fa; color: #333; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .header-content {{ padding: 2rem; max-width: 1200px; margin: 0 auto; text-align: center; }}
+        .container {{ max-width: 1200px; margin: 0 auto; padding: 2rem; }}
+        .summary-card {{ background: white; border-radius: 10px; padding: 2rem; margin-bottom: 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem; }}
+        .summary-item {{ text-align: center; padding: 1rem; border-radius: 8px; }}
+        .summary-item.total {{ background: #e3f2fd; }}
+        .summary-item.passed {{ background: #e8f5e9; }}
+        .summary-item.failed {{ background: #ffebee; }}
+        .summary-number {{ font-size: 2rem; font-weight: bold; display: block; }}
+        .summary-label {{ font-size: 0.9rem; opacity: 0.8; }}
+        .status-badge {{ display: inline-block; padding: 0.5rem 1rem; border-radius: 20px; font-weight: bold; margin-bottom: 1rem; }}
+        .status-passed {{ background: #4caf50; color: white; }}
+        .status-failed {{ background: #f44336; color: white; }}
+        .test-results {{ background: white; border-radius: 10px; padding: 2rem; margin-bottom: 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        .test-result-item {{ padding: 1rem; border-left: 4px solid #eee; margin-bottom: 1rem; border-radius: 4px; }}
+        .test-result-item.passed {{ border-left-color: #4caf50; background: #f8fff8; }}
+        .test-result-item.failed {{ border-left-color: #f44336; background: #fff8f8; }}
+        .test-header {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }}
+        .test-name {{ font-weight: bold; font-size: 1.1rem; }}
+        .test-method {{ display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.9rem; margin-right: 0.5rem; }}
+        .method-get {{ background: #2196f3; color: white; }}
+        .method-post {{ background: #4caf50; color: white; }}
+        .method-put {{ background: #ff9800; color: white; }}
+        .method-delete {{ background: #f44336; color: white; }}
+        .test-url {{ color: #666; font-size: 0.9rem; margin: 0.5rem 0; word-break: break-all; }}
+        .test-error {{ color: #f44336; font-size: 0.9rem; margin-top: 0.5rem; padding: 0.5rem; background: #ffebee; border-radius: 4px; }}
+        .status-row {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }}
+        .execution-time {{ color: #666; font-size: 0.9rem; }}
+        .footer {{ text-align: center; margin-top: 2rem; padding: 1rem; color: #666; font-size: 0.9rem; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>接口测试报告（合并）</h1>
+            <p>批量执行 {total_suites} 个套件</p>
+        </div>
+    </div>
+    <div class="container">
+        <div class="summary-card">
+            <h2>汇总</h2>
+            <div class="summary-grid">
+                <div class="summary-item total"><span class="summary-number">{total_suites}</span><span class="summary-label">套件数</span></div>
+                <div class="summary-item total"><span class="summary-number">{total_requests}</span><span class="summary-label">总请求数</span></div>
+                <div class="summary-item passed"><span class="summary-number">{total_passed}</span><span class="summary-label">通过数</span></div>
+                <div class="summary-item failed"><span class="summary-number">{total_failed}</span><span class="summary-label">失败数</span></div>
+            </div>
+        </div>
+        {''.join(suite_sections)}
+        <div class="footer">
+            <p>报告生成时间: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
     def _check_java_environment(self):
         """检查 Java 运行环境是否可用"""
         try:

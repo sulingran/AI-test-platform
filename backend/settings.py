@@ -3,8 +3,12 @@
 from pathlib import Path
 from decouple import config
 import os
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 让 os.getenv 也能读到 .env（settings 本身用 decouple，二者并存；不覆盖已有的进程环境变量）
+load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 
 def parse_csv(value):

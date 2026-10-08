@@ -196,6 +196,7 @@ class TestSuiteRequest(models.Model):
     request = models.ForeignKey(ApiRequest, on_delete=models.CASCADE, verbose_name='API请求')
     order = models.IntegerField(default=0, verbose_name='执行顺序')
     assertions = models.JSONField(default=list, verbose_name='断言规则')
+    extract_vars = models.JSONField(default=list, verbose_name='响应提取变量')
     enabled = models.BooleanField(default=True, verbose_name='是否启用')
 
     class Meta:

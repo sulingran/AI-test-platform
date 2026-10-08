@@ -19,6 +19,7 @@ from .views import (
     UiScheduledTaskViewSet,
     AIExecutionRecordViewSet,
     AICaseViewSet,
+    LocatorMemoryViewSet,
     UiNotificationLogViewSet,
     OperationRecordViewSet,
     UiDashboardViewSet
@@ -46,6 +47,7 @@ router.register(r'ai-cases', AICaseViewSet, basename='ai-cases')
 router.register(r'ai-case-generation', AICaseViewSet, basename='ai-case-generation')
 router.register(r'notification-logs', UiNotificationLogViewSet)
 router.register(r'operation-records', OperationRecordViewSet)
+router.register(r'locator-memories', LocatorMemoryViewSet)
 
 
 # Configuration Center APIs

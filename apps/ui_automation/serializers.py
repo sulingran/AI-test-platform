@@ -6,7 +6,7 @@ from .models import (
     ElementGroup, PageObject, PageObjectElement, ScriptStep, ScriptElementUsage,
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     UiScheduledTask, UiNotificationLog, UiTaskNotificationSetting,
-    AICase, AIExecutionRecord
+    AICase, AIExecutionRecord, LocatorMemory
 )
 from django.contrib.auth import get_user_model
 
@@ -834,6 +834,23 @@ class AIExecutionRecordSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ('start_time', 'end_time', 'duration', 'executed_by', 'gif_path', 'screenshots_sequence')
 
+
+class LocatorMemorySerializer(serializers.ModelSerializer):
+    """定位器记忆序列化器（只读展示为主，核心字段保留可写以便后续扩展增删改）"""
+    project = UiProjectSerializer(read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    source_record_name = serializers.CharField(source='source_record.case_name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = LocatorMemory
+        fields = [
+            'id', 'project', 'project_name', 'source_record', 'source_record_name',
+            'page_url', 'semantic_key', 'semantic_text', 'node_name',
+            'locator_strategy', 'locator_value', 'attributes', 'element_hash',
+            'embedding', 'confidence', 'hit_count', 'last_hit_at', 'last_seen_at',
+            'is_valid', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ('created_at', 'updated_at')
 
 
 class UiNotificationLogSerializer(serializers.ModelSerializer):

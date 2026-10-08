@@ -140,6 +140,17 @@ setup_ai_config.py
 api_test_results*.json
 probe_*.json
 temp_*.txt
+analyze_remaining.py
+backfill_bodies.py
+build_gocloud_manifest.py
+check_locator_memory.py
+diag_auth.py
+fetch_400_detail.py
+fix_400.py
+gocloud_sweep.py
+gocloud_manifest.json
+load_gocloud_cases.py
+refresh_token.bat
 
 # 日志（根目录 daphne 日志；logs/ 已在上方忽略）
 *.log

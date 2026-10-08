@@ -57,6 +57,7 @@ export default {
     aiIntelligentTesting: 'AI Intelligent Testing',
     aiCaseManagement: 'AI Case Management',
     aiExecutionRecords: 'AI Test Reports',
+    locatorMemory: 'Locator Memory',
 
     // Configuration Center
     aiCaseGenerationConfig: 'AI Test Case Config',

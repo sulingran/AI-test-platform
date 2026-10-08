@@ -9,7 +9,7 @@ from django.core.management.base import BaseCommand
 
 from apps.core.real_env_token import (
     decode_jwt_exp,
-    fetch_real_env_token,
+    fetch_real_env_token_detail,
     write_token_to_environment,
 )
 
@@ -20,9 +20,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         from apps.api_testing.models import Environment
 
-        token = fetch_real_env_token()
+        token, err = fetch_real_env_token_detail()
         if not token:
-            self.stdout.write(self.style.ERROR("获取 token 失败，未更新任何环境变量"))
+            self.stdout.write(self.style.ERROR("获取 token 失败：%s" % (err or "未知原因")))
             return
 
         exp = decode_jwt_exp(token)

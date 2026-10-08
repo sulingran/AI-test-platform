@@ -1,7 +1,7 @@
 # 前端 Dockerfile - 多阶段构建
 
-# 阶段1: 构建阶段
-FROM node:18-alpine AS builder
+# 阶段1: 构建阶段（Vite 7 需要 Node 20.19+ / 22.12+）
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 

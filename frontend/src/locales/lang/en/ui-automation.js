@@ -111,6 +111,31 @@ export default {
     confirmDelete: 'Confirm Delete'
   },
 
+  // Locator Memory
+  locatorMemory: {
+    serialNumber: '#',
+    pageUrl: 'Page URL',
+    semanticText: 'Semantic Text',
+    nodeName: 'Node Name',
+    locatorStrategy: 'Locator Strategy',
+    locatorValue: 'Locator Value',
+    hitCount: 'Hits',
+    isValid: 'Valid',
+    valid: 'Valid',
+    invalid: 'Invalid',
+    lastHitAt: 'Last Hit',
+    updatedAt: 'Updated At',
+    viewDetail: 'Detail',
+    detailTitle: 'Locator Memory Detail',
+    projectName: 'Project',
+    sourceRecord: 'Source Record',
+    confidence: 'Confidence',
+    semanticKey: 'Semantic Key',
+    attributes: 'Attributes',
+    embedding: 'Embedding',
+    searchPlaceholder: 'Search semantic text / locator / URL / node'
+  },
+
   // Status
   status: {
     notStarted: 'Not Started',

@@ -57,6 +57,7 @@ export default {
     aiIntelligentTesting: 'AI 智能测试',
     aiCaseManagement: 'AI 用例管理',
     aiExecutionRecords: 'AI测试报告',
+    locatorMemory: '定位器记忆库',
 
     // 配置中心
     aiCaseGenerationConfig: 'AI用例生成配置',

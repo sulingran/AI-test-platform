@@ -1006,6 +1006,15 @@ export function getAIExecutionRecords(params) {
   })
 }
 
+// 获取定位器记忆库列表
+export function getLocatorMemories(params) {
+  return request({
+    url: '/ui-automation/locator-memories/',
+    method: 'get',
+    params
+  })
+}
+
 // 获取 AI 执行记录详情
 export function getAIExecutionRecordDetail(id) {
   return request({

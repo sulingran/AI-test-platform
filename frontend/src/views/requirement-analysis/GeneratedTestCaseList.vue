@@ -123,6 +123,12 @@
                 </button>
                 <button
                   v-if="task.status === 'completed'"
+                  class="export-btn"
+                  @click="exportTaskToExcel(task)">
+                  {{ $t('generatedTestCases.exportExcel') }}
+                </button>
+                <button
+                  v-if="task.status === 'completed'"
                   class="adopt-btn"
                   @click="batchAdoptTask(task)">
                   {{ $t('generatedTestCases.batchAdopt') }}
@@ -382,6 +388,7 @@
 <script>
 import api from '@/utils/api'
 import { ElMessage } from 'element-plus'
+import * as XLSX from 'xlsx'
 
 export default {
   name: 'GeneratedTestCaseList',
@@ -751,6 +758,216 @@ export default {
         hour: '2-digit',
         minute: '2-digit'
       })
+    },
+
+    // 格式化列表中的文本，将<br>转换为换行
+    formatTextForList(text) {
+      if (!text) return ''
+      return text.replace(/<br\s*\/?>/gi, '\n')
+    },
+
+    // 解析最终测试用例内容（与任务详情的解析逻辑保持一致）
+    parseTestCases(content) {
+      if (!content) return []
+
+      // 去除markdown加粗标记，保留纯净文本
+      let cleanContent = content.replace(/\*\*([^*]+)\*\*/g, '$1')
+
+      const lines = cleanContent.split('\n').filter(line => line.trim())
+      const testCases = []
+
+      // 尝试解析表格格式
+      let isTableFormat = false
+      const tableData = []
+
+      for (let line of lines) {
+        const trimmedLine = line.trim()
+        if (trimmedLine.includes('|') && !trimmedLine.includes('--------')) {
+          const cells = trimmedLine.split('|').map(cell => cell.trim()).filter(cell => cell)
+          if (cells.length > 1) {
+            tableData.push(cells)
+            isTableFormat = true
+          }
+        }
+      }
+
+      if (isTableFormat && tableData.length > 1) {
+        // 表格格式解析
+        const headers = tableData[0]
+        for (let i = 1; i < tableData.length; i++) {
+          const row = tableData[i]
+          const testCase = {}
+
+          // 清理<br>标签的辅助函数
+          const cleanBrTags = (text) => {
+            if (!text) return ''
+            return text.replace(/<br\s*\/?>/gi, '\n')
+          }
+
+          headers.forEach((header, index) => {
+            const value = cleanBrTags(row[index] || '')
+
+            // 使用精确匹配，避免误判
+            const cleanHeader = header.trim().toLowerCase()
+
+            if (cleanHeader === '优先级' || cleanHeader === 'priority' || cleanHeader === 'priority（优先级）' || cleanHeader === '优先级（priority）') {
+              testCase.priority = value
+            } else if (cleanHeader === '用例id' || cleanHeader === '编号' || cleanHeader === 'id' || cleanHeader.includes('用例id')) {
+              testCase.caseId = value
+            } else if (cleanHeader === '测试目标' || cleanHeader === '测试场景' || cleanHeader === '场景' || cleanHeader === '标题' || cleanHeader.includes('测试目标')) {
+              testCase.scenario = value
+            } else if (cleanHeader === '前置条件' || cleanHeader === '前置' || cleanHeader === '前提条件') {
+              testCase.precondition = value
+            } else if (cleanHeader === '测试步骤' || cleanHeader === '操作步骤' || cleanHeader === '步骤') {
+              if (!cleanHeader.includes('预期') && !cleanHeader.includes('结果')) {
+                testCase.steps = value
+              }
+            } else if (cleanHeader === '预期结果' || cleanHeader === '预期' || cleanHeader === '结果' || cleanHeader.includes('预期结果')) {
+              testCase.expected = value
+            }
+          })
+
+          if (testCase.scenario || testCase.caseId) {
+            if (!testCase.steps && testCase.scenario) {
+              testCase.steps = testCase.scenario
+            }
+            if (!testCase.priority) {
+              testCase.priority = 'P2'
+            }
+            testCases.push(testCase)
+          }
+        }
+      } else {
+        // 结构化文本格式解析
+        let currentTestCase = {}
+        let caseNumber = 1
+
+        for (const line of lines) {
+          if (line.includes('测试用例') || line.includes('Test Case') ||
+              line.match(/^(\d+\.|\*|\-|\d+、)/)) {
+
+            if (Object.keys(currentTestCase).length > 0) {
+              testCases.push(currentTestCase)
+              caseNumber++
+            }
+
+            currentTestCase = {
+              caseId: `TC${String(caseNumber).padStart(3, '0')}`,
+              scenario: line.replace(/^(\d+\.|\*|\-|\d+、)\s*/, '').replace(/测试用例\d*[:：]?\s*/, '').replace(/Test Case\s*\d*[:：]?\s*/i, ''),
+              precondition: '',
+              steps: '',
+              expected: '',
+              priority: 'P2'
+            }
+          } else if (line.includes('前置条件') || line.includes('前提')) {
+            currentTestCase.precondition = line.replace(/.*?[:：]\s*/, '')
+          } else if (line.includes('测试步骤') || line.includes('操作步骤') || line.includes('步骤')) {
+            currentTestCase.steps = line.replace(/.*?[:：]\s*/, '')
+          } else if (line.includes('预期结果') || line.includes('Expected')) {
+            currentTestCase.expected = line.replace(/.*?[:：]\s*/, '')
+          } else if (line.includes('优先级')) {
+            currentTestCase.priority = line.replace(/.*?[:：]\s*/, '')
+          }
+        }
+
+        if (Object.keys(currentTestCase).length > 0) {
+          testCases.push(currentTestCase)
+        }
+      }
+
+      return testCases
+    },
+
+    // 导出单个任务的测试用例到 Excel（在任务详情导出格式前加“任务ID”“需求名称”两列）
+    exportTaskToExcel(task) {
+      if (!task.final_test_cases) {
+        ElMessage.warning(this.$t('generatedTestCases.noCasesToExport'))
+        return
+      }
+
+      const testCases = this.parseTestCases(task.final_test_cases)
+      if (testCases.length === 0) {
+        ElMessage.warning(this.$t('generatedTestCases.noCasesToExport'))
+        return
+      }
+
+      try {
+        // 创建工作簿
+        const workbook = XLSX.utils.book_new()
+        const worksheetData = []
+
+        // 表头：任务ID、需求名称 + 任务详情导出的原有列
+        worksheetData.push([
+          this.$t('generatedTestCases.taskId'),
+          this.$t('generatedTestCases.requirementName'),
+          this.$t('taskDetail.tableCaseId'),
+          this.$t('taskDetail.tableScenario'),
+          this.$t('taskDetail.tablePrecondition'),
+          this.$t('taskDetail.tableSteps'),
+          this.$t('taskDetail.tableExpected'),
+          this.$t('taskDetail.tablePriority')
+        ])
+
+        // 数据行
+        testCases.forEach((testCase, index) => {
+          worksheetData.push([
+            task.task_id || '',
+            task.title || '',
+            testCase.caseId || `TC${String(index + 1).padStart(3, '0')}`,
+            testCase.scenario || '',
+            this.formatTextForList(testCase.precondition || ''),
+            this.formatTextForList(testCase.steps || ''),
+            this.formatTextForList(testCase.expected || ''),
+            testCase.priority || 'P2'
+          ])
+        })
+
+        // 创建工作表
+        const worksheet = XLSX.utils.aoa_to_sheet(worksheetData)
+
+        // 设置列宽
+        const colWidths = [
+          { wch: 15 }, // 任务ID
+          { wch: 25 }, // 需求名称
+          { wch: 15 }, // 测试用例编号
+          { wch: 30 }, // 测试场景
+          { wch: 25 }, // 前置条件
+          { wch: 50 }, // 操作步骤
+          { wch: 40 }, // 预期结果
+          { wch: 10 }  // 优先级
+        ]
+        worksheet['!cols'] = colWidths
+
+        // 为所有单元格添加自动换行样式
+        const range = XLSX.utils.decode_range(worksheet['!ref'])
+        for (let row = range.s.r; row <= range.e.r; row++) {
+          for (let col = range.s.c; col <= range.e.c; col++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: row, c: col })
+            if (!worksheet[cellAddress]) continue
+            worksheet[cellAddress].s = {
+              alignment: {
+                wrapText: true,
+                vertical: 'top'
+              }
+            }
+          }
+        }
+
+        // 将工作表添加到工作簿
+        XLSX.utils.book_append_sheet(workbook, worksheet, this.$t('generatedTestCases.exportSheetName'))
+
+        // 生成文件名
+        const dateStr = new Date().toISOString().slice(0, 10)
+        const fileName = this.$t('generatedTestCases.exportFileName', { taskId: task.task_id, date: dateStr })
+
+        // 导出文件
+        XLSX.writeFile(workbook, fileName)
+
+        ElMessage.success(this.$t('generatedTestCases.exportSuccess'))
+      } catch (error) {
+        console.error('Export Excel failed:', error)
+        ElMessage.error(this.$t('generatedTestCases.exportFailed') + ': ' + (error.message || ''))
+      }
     },
 
     // 获取项目列表
@@ -1199,7 +1416,7 @@ export default {
 
 .table-header {
   display: grid;
-  grid-template-columns: 50px 60px 180px 320px 100px 100px 180px 260px;
+  grid-template-columns: 50px 60px 180px 320px 100px 100px 180px 190px;
   background: #f8f9fa;
   font-weight: bold;
   color: #2c3e50;
@@ -1207,7 +1424,7 @@ export default {
 
 .table-body .table-row {
   display: grid;
-  grid-template-columns: 50px 60px 180px 320px 100px 100px 180px 260px;
+  grid-template-columns: 50px 60px 180px 320px 100px 100px 180px 190px;
   border-bottom: 1px solid #eee;
   transition: background 0.2s ease;
 }
@@ -1238,6 +1455,7 @@ export default {
   padding: 12px;
   display: flex;
   align-items: center;
+  justify-content: center;
   border-right: 1px solid #eee;
   word-wrap: break-word;
   word-break: break-word;
@@ -1276,7 +1494,7 @@ export default {
 }
 
 .body-cell.task-id-cell {
-  justify-content: flex-start;
+  justify-content: center;
 }
 
 /* 关联需求列 */
@@ -1287,7 +1505,7 @@ export default {
 }
 
 .body-cell.requirement-name-cell {
-  justify-content: flex-start;
+  justify-content: center;
 }
 
 /* 状态列 */
@@ -1319,7 +1537,7 @@ export default {
 
 /* 操作列：固定在右侧，横向滚动时始终可见 */
 .action-cell {
-  min-width: 260px;
+  min-width: 190px;
   flex-shrink: 0;
   position: sticky;
   right: 0;
@@ -1329,6 +1547,8 @@ export default {
 
 .header-cell.action-cell {
   background: #f8f9fa;
+  text-align: center;
+  justify-content: center;
 }
 
 .body-cell.action-cell {
@@ -1349,10 +1569,10 @@ export default {
 .action-buttons {
   display: flex;
   gap: 4px;
-  flex-wrap: nowrap;
   align-items: center;
+  flex-wrap: nowrap;
+  width: 100%;
   justify-content: center;
-  margin: 0 auto;
 }
 
 .count-badge {
@@ -1439,10 +1659,10 @@ export default {
   background: #3498db;
   color: white;
   border: none;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   transition: background 0.3s ease;
   white-space: nowrap;
 }
@@ -1455,10 +1675,10 @@ export default {
   background: #27ae60;
   color: white;
   border: none;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   transition: background 0.3s ease;
   white-space: nowrap;
 }
@@ -1471,10 +1691,10 @@ export default {
   background: #e74c3c;
   color: white;
   border: none;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   transition: background 0.3s ease;
   white-space: nowrap;
 }
@@ -1483,13 +1703,20 @@ export default {
   background: #c0392b;
 }
 
-.action-buttons {
-  display: flex;
-  gap: 4px;
-  flex-wrap: nowrap;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto;
+.export-btn {
+  background: #17a2b8;
+  color: white;
+  border: none;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: background 0.3s ease;
+  white-space: nowrap;
+}
+
+.export-btn:hover {
+  background: #138496;
 }
 
 .adopted-label {
@@ -1815,18 +2042,7 @@ export default {
   }
 
   .action-buttons {
-    flex-direction: row;
-    gap: 2px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-
-  .view-detail-btn,
-  .adopt-btn,
-  .discard-btn {
-    margin-right: 0;
-    font-size: 0.65rem;
-    padding: 2px 4px;
+    gap: 3px;
   }
 }
 
@@ -1853,18 +2069,9 @@ export default {
   }
   
   .action-buttons {
-    flex-direction: column;
-    gap: 2px;
-    align-items: stretch;
+    gap: 3px;
   }
-  
-  .view-detail-btn,
-  .adopt-btn,
-  .discard-btn {
-    font-size: 0.65rem;
-    padding: 2px 4px;
-  }
-  
+
   .form-row {
     flex-direction: column;
     gap: 15px;

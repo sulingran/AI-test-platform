@@ -8,7 +8,6 @@ import asyncio
 from typing import Dict, Any, List, AsyncIterator
 from asgiref.sync import sync_to_async
 import logging
-from apps.ai.client import AIClient
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +215,7 @@ class AIModelConfig(models.Model):
         ('reviewer', '测试评审专家'),
         ('browser_use_text', 'Browser Use - 文本模式'),
         ('browser_use_vision', 'Browser Use - 视觉模式'),
+        ('element_locator', '元素定位/自愈'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -615,6 +615,25 @@ class AIModelService:
         return await AIModelService.call_openai_compatible_api(config, messages)
 
     @staticmethod
+    def _strip_incomplete_tail(content: str) -> str:
+        """
+        去掉流式输出末尾被截断的半截内容。
+
+        glm-5.3-flash 是推理模型，max_tokens 会被 reasoning 字段消耗，
+        触发 finish_reason='length' 时往往截断在 markdown 表格单元格中间。
+        若直接把半截行回填进历史续写，模型会重复/错乱整行。这里在续写前
+        把末尾未闭合的半截表格行裁掉，让模型从一条完整用例之后干净地续写。
+        """
+        if not content or content.endswith('\n'):
+            return content
+        stripped = content.rstrip()
+        last_nl = stripped.rfind('\n')
+        last_line = stripped[last_nl + 1:] if last_nl != -1 else stripped
+        if last_line.lstrip().startswith('|') and not last_line.rstrip().endswith('|'):
+            return content[:last_nl + 1] if last_nl != -1 else ''
+        return content
+
+    @staticmethod
     async def call_openai_compatible_api_stream(
             config: AIModelConfig,
             messages: List[Dict[str, str]],
@@ -718,7 +737,17 @@ class AIModelService:
                 if finish_reason == 'length':
                     logger.warning(
                         f"检测到生成被截断 (finish_reason='length')，准备自动续写。当前已续写 {continuation_count} 次。")
+
+                    # 推理模型可能在产生任何正式内容之前就耗尽 max_tokens（reasoning 阶段即被截断）。
+                    # 此时继续请求只会重新推理、再次空转，浪费 token 且可能死循环，直接放弃续写。
+                    if not chunk_content_buffer.strip():
+                        logger.warning("截断发生在内容生成前（无有效输出），跳过续写。")
+                        break
+
                     continuation_count += 1
+
+                    # 截断常发生在表格单元格中间：裁掉末尾半截行，避免续写时模型从半截单元格开始导致整行重复。
+                    chunk_content_buffer = AIModelService._strip_incomplete_tail(chunk_content_buffer)
 
                     # 将本次生成的内容作为 assistant 回复加入历史
                     # 注意：如果之前已经有assistant消息，需要追加内容而不是新增消息
@@ -731,10 +760,9 @@ class AIModelService:
                     # 防止多次续写时堆叠重复的 user 指令
                     if current_messages[-1]['role'] != 'user':
                         current_messages.append(
-                            {"role": "user", "content": "请继续输出剩余的内容，不要重复已输出的部分，紧接着上文继续。"})
+                            {"role": "user", "content": "上文已输出的内容不要重复。请直接从下一条测试用例开始继续输出，"
+                                                        "编号紧接着已输出的最后一个完整用例往下排，直到全部输出完毕。"})
 
-                    # 发送换行符以分隔续写内容（可选，视模型而定，通常不需要，但为了保险）
-                    # yield "\n"
                     continue
                 else:
                     logger.info(f"流式生成正常结束 (finish_reason={finish_reason})")
@@ -1360,31 +1388,3 @@ class AIModelService:
         logger.info(f"重新编号完成: 共{total_cases}条测试用例，编号范围: {prefix}001-{prefix}{total_cases:03d}")
 
         return renumbered_content
-
-
-# Keep the long-standing AIModelService API stable while routing transport
-# through the shared gateway. The original implementations remain above as a
-# readable fallback during the migration and for downstream integrations that
-# still import helper methods from this module.
-async def _gateway_chat(config, messages, max_tokens=None):
-    return await AIClient.chat(config, messages, max_tokens=max_tokens, scenario="requirement_analysis")
-
-
-async def _gateway_stream(config, messages, callback=None, max_tokens=None):
-    async for chunk in AIClient.chat_stream(
-        config,
-        messages,
-        callback=callback,
-        max_tokens=max_tokens,
-        scenario="requirement_analysis",
-    ):
-        yield chunk
-
-
-async def _gateway_list_models(config):
-    return await AIClient.list_models(config, scenario="requirement_analysis")
-
-
-AIModelService.call_openai_compatible_api = staticmethod(_gateway_chat)
-AIModelService.call_openai_compatible_api_stream = staticmethod(_gateway_stream)
-AIModelService.list_available_models = staticmethod(_gateway_list_models)

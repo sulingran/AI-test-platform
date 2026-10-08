@@ -22,7 +22,7 @@ from .models import (
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
     UiScheduledTask, UiNotificationLog, UiTaskNotificationSetting,
-    AICase, AIExecutionRecord
+    AICase, AIExecutionRecord, LocatorMemory
 )
 from .serializers import (
     UiProjectSerializer, UiProjectCreateSerializer, UiProjectUpdateSerializer,
@@ -40,7 +40,7 @@ from .serializers import (
     TestCaseSerializer, TestCaseStepSerializer, TestCaseExecutionSerializer, TestCaseRunSerializer,
     OperationRecordSerializer,
     UiScheduledTaskSerializer, UiNotificationLogSerializer, UiTaskNotificationSettingSerializer,
-    AICaseSerializer, AIExecutionRecordSerializer
+    AICaseSerializer, AIExecutionRecordSerializer, LocatorMemorySerializer
 )
 from .operation_logger import log_operation
 
@@ -2937,6 +2937,83 @@ class AICaseViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.delete()
 
+    async def _persist_locator_memories(self, execution_record, step_info):
+        """把 AI 识别到的元素定位信息落库到定位器记忆库（智能元素定位）。"""
+        from asgiref.sync import sync_to_async
+        from apps.ai.client import AIClient
+        from apps.ai.resolver import ConfigResolver
+
+        url = LocatorMemory.normalize_url(step_info.get('url', ''))
+        if not url:
+            return []
+        elements = [el for el in (step_info.get('elements') or []) if el]
+        now = timezone.now()
+
+        # 尽力而为：批量生成语义向量（无 embedding 配置/失败则降级为空，不中断主流程）
+        embedding_map = {}
+        try:
+            texts = [str(el.get('semantic_text') or '').strip() for el in elements]
+            texts = [t for t in texts if t]
+            if texts:
+                # 只在真正配置了 embedding/tokenizer 模型时才生成向量，避免拿对话模型硬调 /embeddings 白耗延时
+                cfg = await sync_to_async(ConfigResolver.active)('embedding')
+                if cfg is None:
+                    cfg = await sync_to_async(ConfigResolver.active)('tokenizer')
+                if cfg is not None:
+                    vectors = await AIClient.embeddings(cfg, texts, scenario='locator_memory')
+                    for text, vec in zip(texts, vectors or []):
+                        if vec:
+                            embedding_map[text] = vec
+        except Exception as e:
+            logger.warning(f"生成定位器语义向量失败(降级为空): {e}")
+
+        created_ids = []
+        for el in elements:
+            try:
+                node_name = str(el.get('node_name') or '')
+                semantic_text = str(el.get('semantic_text') or '')
+                semantic_key = LocatorMemory.make_semantic_key(node_name, semantic_text)
+                if not semantic_key:
+                    continue
+                locator_value = str(el.get('value') or '')
+                cleaned_text = semantic_text.strip()
+                defaults = {
+                    'project': execution_record.project,
+                    'source_record': execution_record,
+                    'semantic_text': semantic_text,
+                    'node_name': node_name,
+                    'locator_strategy': str(el.get('strategy') or ''),
+                    'locator_value': locator_value,
+                    'attributes': el.get('attributes') or {},
+                    'element_hash': str(el.get('element_hash') or ''),
+                    'embedding': embedding_map.get(cleaned_text, []),
+                    'last_seen_at': now,
+                }
+                memory, created = await sync_to_async(LocatorMemory.objects.get_or_create)(
+                    page_url=url,
+                    semantic_key=semantic_key,
+                    defaults=defaults,
+                )
+                if created:
+                    created_ids.append(memory.id)
+                else:
+                    # 命中历史记忆：计数 + 刷新最近观察时间，并保留最新定位值
+                    memory.hit_count += 1
+                    memory.last_hit_at = now
+                    memory.last_seen_at = now
+                    memory.is_valid = True  # 真实再次观察 → 复活被置信度衰减误伤的记忆
+                    if locator_value:
+                        memory.locator_value = locator_value
+                    if el.get('strategy'):
+                        memory.locator_strategy = str(el.get('strategy'))
+                    memory.embedding = embedding_map.get(cleaned_text, memory.embedding or [])
+                    await sync_to_async(memory.save)(
+                        update_fields=['hit_count', 'last_hit_at', 'last_seen_at', 'locator_value', 'locator_strategy', 'embedding', 'is_valid']
+                    )
+            except Exception as e:
+                logger.warning(f"落库定位器记忆失败: {e}")
+        return created_ids
+
     @action(detail=True, methods=['post'])
     def run(self, request, pk=None):
         """执行 AI 用例"""
@@ -3019,6 +3096,11 @@ class AICaseViewSet(viewsets.ModelViewSet):
                             if content:
                                 execution_record.logs += content
                                 await sync_to_async(safe_save)(execution_record, update_fields=['logs'])
+                            return
+
+                        # 处理定位器记忆（智能元素定位/自愈）
+                        if step_info.get('type') == 'locator':
+                            await self._persist_locator_memories(execution_record, step_info)
                             return
 
                         # 处理任务状态
@@ -3384,6 +3466,28 @@ def is_infrastructure_failure(error_message: str) -> bool:
         'service unavailable',
     ]
     return any(marker in message for marker in infra_markers)
+
+
+class LocatorMemoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """定位器记忆库视图集（只读，供 UI 展示 AI 识别到的元素定位信息）"""
+    queryset = LocatorMemory.objects.all()
+    serializer_class = LocatorMemorySerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project', 'locator_strategy', 'is_valid']
+    search_fields = ['semantic_text', 'locator_value', 'page_url', 'node_name']
+    ordering_fields = ['hit_count', 'last_hit_at', 'last_seen_at', 'updated_at', 'created_at']
+    ordering = ['-updated_at']
+
+    def get_queryset(self):
+        user = self.request.user
+        accessible_projects = UiProject.objects.filter(
+            models.Q(owner=user) | models.Q(members=user)
+        ).distinct()
+        # 返回用户有权限的项目下的记忆，以及没有关联项目的记忆
+        return LocatorMemory.objects.filter(
+            models.Q(project__in=accessible_projects) | models.Q(project__isnull=True)
+        ).distinct()
 
 
 class AIExecutionRecordViewSet(viewsets.ModelViewSet):

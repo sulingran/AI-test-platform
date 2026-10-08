@@ -219,12 +219,16 @@ export default {
     actions: '操作',
 
     // Actions
-    viewDetail: '查看详情',
+    viewDetail: '查看',
     adoptAll: '全部采纳',
-    exportExcel: '导出Excel',
+    exportExcel: '导出',
     delete: '删除',
-    batchAdopt: '批量采纳',
-    batchDiscard: '批量弃用',
+    requirementName: '需求名称',
+    noCasesToExport: '该任务没有可导出的测试用例',
+    exportSheetName: '测试用例',
+    exportFileName: 'AI生成测试用例_{taskId}_{date}.xlsx',
+    batchAdopt: '采纳',
+    batchDiscard: '弃用',
 
     // Empty State
     noTasks: '暂无生成任务',

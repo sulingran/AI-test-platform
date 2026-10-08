@@ -19,6 +19,122 @@ load_dotenv()
 
 TASK_STATUS_ACTIONS = {'mark_task_complete', 'mark_task_failed', 'mark_task_skipped'}
 
+# 定位器记忆复用/自愈的 JS 定位执行器。
+# browser-use 存的是自定义相对路径（html/body/div[3]/input[1]，[n] = 同类兄弟第 n 个），
+# 不能直接喂 document.evaluate，需自定义 walker 还原；自愈备选 xpath 才是标准 XPath（/ 开头）。
+# 注意：page.evaluate 会 json.dumps 注入参数、返回字符串，JS 内一律用单引号。
+_LOCATOR_JS = r"""(args) => {
+  const xpath = args.xpath || '';
+  const action = args.action || 'click';
+  const text = args.text || '';
+
+  function resolveCustom(xp) {
+    const segs = xp.split('/').filter(Boolean).map(function (seg) {
+      const m = seg.match(/^([a-zA-Z0-9_\-:.]+)(?:\[(\d+)\])?$/);
+      return m ? { tag: m[1].toLowerCase(), idx: m[2] ? parseInt(m[2], 10) : 0 } : null;
+    });
+    if (!segs.length || segs.some(function (s) { return !s; })) return null;
+    const root = document.documentElement;
+    if (segs[0].tag !== root.tagName.toLowerCase()) return null;
+    let ctx = root;
+    for (let k = 1; k < segs.length; k++) {
+      const seg = segs[k];
+      const kids = Array.prototype.filter.call(ctx.children, function (e) {
+        return e.tagName.toLowerCase() === seg.tag;
+      });
+      if (!kids.length) return null;
+      ctx = seg.idx > 0 ? (kids[seg.idx - 1] || null) : kids[0];
+      if (!ctx) return null;
+    }
+    return ctx;
+  }
+
+  function findElement(xp) {
+    if (!xp) return null;
+    const lead = xp.trim();
+    if (lead.charAt(0) === '/' || lead.slice(0, 2) === './/') {
+      try {
+        const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        return r.singleNodeValue || null;
+      } catch (e) { return null; }
+    }
+    try { return resolveCustom(lead); } catch (e) { return null; }
+  }
+
+  function setNativeValue(el, value) {
+    let proto;
+    const tag = (el.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA') proto = HTMLTextAreaElement.prototype;
+    else if (tag === 'SELECT') proto = HTMLSelectElement.prototype;
+    else proto = HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) { desc.set.call(el, value); } else { el.value = value; }
+  }
+
+  const el = findElement(xpath);
+  if (!el) return JSON.stringify({ ok: false, reason: 'not_found' });
+
+  try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+
+  const out = { ok: true, tag: (el.tagName || '').toLowerCase() };
+
+  if (action === 'click') {
+    try {
+      const o = { bubbles: true, cancelable: true, composed: true, view: window };
+      el.dispatchEvent(new MouseEvent('pointerdown', o));
+      el.dispatchEvent(new MouseEvent('mousedown', o));
+      el.dispatchEvent(new MouseEvent('mouseup', o));
+      el.dispatchEvent(new MouseEvent('click', o));
+      out.clicked = true;
+    } catch (e) { out.clicked = false; out.err = String(e); }
+  } else if (action === 'input') {
+    try {
+      el.focus();
+      setNativeValue(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      let v = null;
+      try { v = (el.value === undefined || el.value === null) ? '' : String(el.value); } catch (e) { v = ''; }
+      out.value = v;
+      out.matches = (v === text);
+    } catch (e) { out.err = String(e); out.matches = false; }
+  }
+  return JSON.stringify(out);
+}"""
+
+# 复用 walker 提取元素可见文本（落库语义兜底）：按钮/链接文字在子文本节点，node_value 取不到
+_LOCATOR_TEXT_JS = r"""(args) => {
+  const xp = args.xpath || '';
+  function walk(xp) {
+    const segs = xp.split('/').filter(Boolean).map(function (seg) {
+      const m = seg.match(/^([a-zA-Z0-9_\-:.]+)(?:\[(\d+)\])?$/);
+      return m ? { tag: m[1].toLowerCase(), idx: m[2] ? parseInt(m[2], 10) : 0 } : null;
+    });
+    if (!segs.length || segs.some(function (s) { return !s; })) return null;
+    const root = document.documentElement;
+    if (segs[0].tag !== root.tagName.toLowerCase()) return null;
+    let ctx = root;
+    for (let k = 1; k < segs.length; k++) {
+      const seg = segs[k];
+      const kids = Array.prototype.filter.call(ctx.children, function (e) { return e.tagName.toLowerCase() === seg.tag; });
+      if (!kids.length) return null;
+      ctx = seg.idx > 0 ? (kids[seg.idx - 1] || null) : kids[0];
+      if (!ctx) return null;
+    }
+    return ctx;
+  }
+  let el = walk(xp);
+  if (!el && xp.trim().charAt(0) === '/') {
+    try {
+      const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      el = r.singleNodeValue || null;
+    } catch (e) {}
+  }
+  if (!el) return '';
+  const t = (el.innerText || el.textContent || '').trim();
+  return t.length > 100 ? t.slice(0, 100) : t;
+}"""
+
 
 def _normalize_action_params(action_name, action_params):
     """Normalize common LLM-generated action parameter variants to browser-use schema."""
@@ -40,8 +156,10 @@ def _normalize_action_params(action_name, action_params):
             normalized_key = 'index'
         elif key in {'tab', 'target', 'target_id'} and action_name in {'switch_tab', 'switch'}:
             normalized_key = 'tab_id'
-        elif key in {'content', 'value'} and action_name in {'input', 'input_text'}:
+        elif key in {'content', 'value'} and action_name in {'input', 'input_text', 'input_memory'}:
             normalized_key = 'text'
+        elif key in {'label', 'description', 'desc', '语义', '元素'} and action_name in {'click_memory', 'input_memory'}:
+            normalized_key = 'semantic'
         normalized_params[normalized_key] = value
     return normalized_params
 
@@ -1835,6 +1953,74 @@ class BaseBrowserAgent:
             except Exception as e:
                 return f"Failed to read page text: {str(e)}"
 
+        # ====== 定位器记忆：硬复用 + 自愈 ======
+        async def _run_locator_js(browser_session, xpath, action, text=''):
+            """执行定位 JS；返回解析后的结果 dict，页面不可用/异常返回 None。"""
+            try:
+                page = await browser_session.get_current_page()
+                if page is None:
+                    return None
+                raw = await page.evaluate(
+                    _LOCATOR_JS,
+                    {'xpath': xpath or '', 'action': action, 'text': text or ''},
+                )
+                if not raw:
+                    return None
+                return json.loads(raw)
+            except Exception as e:
+                logger.warning(f'📍 定位 JS 执行失败 (xpath={xpath!r}): {e}')
+                return None
+
+        async def _memory_act(browser_session, semantic, action, text=''):
+            """按语义命中记忆 → xpath 确定性定位 → 命中/自愈/退回。返回给模型的结果串。"""
+            from asgiref.sync import sync_to_async
+            from apps.ui_automation.models import LocatorMemory
+
+            try:
+                url = await browser_session.get_current_page_url()
+            except Exception:
+                url = ''
+            page_url = LocatorMemory.normalize_url(url)
+
+            candidates = await sync_to_async(LocatorMemory.fuzzy_match)(
+                semantic, page_url=page_url, top_k=5, min_score=0.52,
+            )
+            if not candidates:
+                return f"MEMORY_MISS: 记忆库无 '{semantic}' 的可用定位器 (页面 {page_url})，请回退到 index 定位。"
+
+            best = candidates[0][1]
+            for score, mem in candidates:
+                res = await _run_locator_js(browser_session, mem.locator_value, action, text)
+                used_heal = None
+                # 主定位器失效 → 用属性重建标准 XPath 自愈
+                if res is not None and not res.get('ok'):
+                    for alt in LocatorMemory.build_xpath_from_attributes(mem):
+                        res = await _run_locator_js(browser_session, alt, action, text)
+                        if res is not None and res.get('ok'):
+                            used_heal = alt
+                            break
+                if res is not None and res.get('ok'):
+                    if used_heal:
+                        await sync_to_async(LocatorMemory.heal)(mem.id, used_heal)
+                        logger.info(f'🧬 自愈: 记忆 #{mem.id} 定位器回写为 {used_heal}')
+                    await sync_to_async(LocatorMemory.record_hit)(mem.id)
+                    tag = res.get('tag', '')
+                    return (f"MEMORY_OK: 命中记忆 #{mem.id} (score={score:.2f}, tag={tag})，"
+                            f"已用 {used_heal or mem.locator_value} 完成 {action}。")
+
+            # 全候选失效：衰减最优候选置信度，明示退回 index
+            await sync_to_async(LocatorMemory.record_miss)(best.id)
+            return (f"MEMORY_MISS: {len(candidates)} 个候选定位器均失效，已衰减置信度，"
+                    f"请回退到 index 定位完成 {action}。")
+
+        @controller.action('Click an element by semantic memory (FAST PATH). Use when the target was seen in a previous run (login button, submit, search). Pass semantic as the exact visible text/label. If it returns MEMORY_MISS, fall back to a normal index-based click and do NOT retry this action.')
+        async def click_memory(semantic: str, browser_session=None):
+            return await _memory_act(browser_session, semantic, 'click')
+
+        @controller.action('Type into an input by semantic memory (FAST PATH). Use for form fields seen in a previous run. Pass semantic (label/placeholder) and text (content to type). If it returns MEMORY_MISS, fall back to index-based input and do NOT retry.')
+        async def input_memory(semantic: str, text: str, browser_session=None):
+            return await _memory_act(browser_session, semantic, 'input', text)
+
         # 构建强化版 Prompt
         final_task = task_description
         if planned_tasks:
@@ -1897,6 +2083,7 @@ class BaseBrowserAgent:
 
         final_task += "14. NO SCREENSHOT: The 'screenshot' action is NOT available (this model has no vision). To inspect or verify page content (e.g. whether a video is playing, a popup appeared, or read an on-screen timestamp), ALWAYS use 'read_page_text' instead. After double-clicking a camera, call 'read_page_text' to confirm the monitoring/video window opened.\n"
         final_task += "15. VIDEO OSD TIMESTAMP: When a task asks to 'record the monitoring video time' / '记录监控画面时间' / 'read the timestamp on the video', that timestamp is OSD text burned into the video PIXELS. A text-only model CANNOT read pixels, and 'read_page_text' CANNOT extract it. DO NOT loop retrying to read it. Instead: record the CURRENT TIME provided above (format 'YYYY-MM-DD HH:MM:SS') as the monitoring time, then IMMEDIATELY call mark_task_complete for that task. This is the expected, correct behavior.\n"
+        final_task += "16. MEMORY FAST PATH (MANDATORY for login/form fields): Two actions 'click_memory' and 'input_memory' locate an element by SEMANTIC MEMORY from elements seen in PREVIOUS runs, instead of guessing an index. For login and repetitive form fields — account/username input, password input, login/submit button — you MUST use 'input_memory' / 'click_memory' FIRST. Do NOT use index for these. Pass 'semantic' as the EXACT visible text/label/placeholder of the element (copy verbatim from the page text; Chinese semantics also work via auto cross-language mapping). For 'input_memory' also pass 'text' (content to type). The action returns MEMORY_OK (done) or MEMORY_MISS (no memory / locator broken). ONLY if it returns MEMORY_MISS, do the same step with a normal index-based action IMMEDIATELY; NEVER retry a memory action, and a MISS is NOT a task failure.\n"
 
         # 核心修复: 清理 task 长文本中的 URL，防止中文标点紧贴 URL 导致 browser-use 解析错误
         # 例如 "http://localhost:3000，" -> "http://localhost:3000 "
@@ -2053,6 +2240,58 @@ class BaseBrowserAgent:
                                 await callback({'type': 'log', 'content': log_content})
                             else:
                                 callback({'type': 'log', 'content': log_content})
+
+                        # 捕获被操作元素的定位信息 → 沉淀到定位器记忆库（智能元素定位）
+                        try:
+                            state = getattr(step, 'state', None)
+                            interacted = getattr(state, 'interacted_element', None) if state else None
+                            page_url = getattr(state, 'url', '') if state else ''
+                            if interacted and page_url:
+                                locator_elements = []
+                                for el in interacted:
+                                    if el is None:
+                                        continue
+                                    attrs = getattr(el, 'attributes', None)
+                                    if not isinstance(attrs, dict):
+                                        attrs = {}
+                                    # 语义文本：value → aria-label → title → placeholder → alt → node_value
+                                    semantic_text = ''
+                                    for attr_name in ['value', 'aria-label', 'title', 'placeholder', 'alt']:
+                                        if attrs.get(attr_name):
+                                            semantic_text = str(attrs[attr_name])
+                                            break
+                                    if not semantic_text:
+                                        semantic_text = str(getattr(el, 'node_value', '') or '').strip()
+                                    x_path = str(getattr(el, 'x_path', '') or '')
+                                    # 兜底：按钮/链接文字在子文本节点（DOMInteractedElement.node_value 取不到），
+                                    # 语义仍为空时用 x_path 回页面查 innerText，让登录按钮类元素也能带上语义进记忆
+                                    if not semantic_text and x_path:
+                                        try:
+                                            _bs = getattr(agent_instance, 'browser_session', None)
+                                            _cp = await _bs.get_current_page() if _bs else None
+                                            if _cp is not None:
+                                                _txt = await _cp.evaluate(_LOCATOR_TEXT_JS, {'xpath': x_path})
+                                                if _txt:
+                                                    semantic_text = str(_txt).strip()
+                                        except Exception:
+                                            pass
+                                    locator_elements.append({
+                                        'node_name': str(getattr(el, 'node_name', '') or ''),
+                                        'attributes': attrs,
+                                        'x_path': x_path,
+                                        'element_hash': str(getattr(el, 'element_hash', '') or ''),
+                                        'semantic_text': semantic_text,
+                                        'strategy': 'xpath',
+                                        'value': x_path,
+                                    })
+                                if locator_elements:
+                                    await emit_callback({
+                                        'type': 'locator',
+                                        'url': str(page_url),
+                                        'elements': locator_elements,
+                                    })
+                        except Exception as locator_error:
+                            logger.warning(f"⚠️ 捕获定位器信息失败: {locator_error}")
 
                         browser_session = getattr(agent_instance, 'browser_session', None)
                         if browser_session is not None:

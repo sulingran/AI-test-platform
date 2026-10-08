@@ -4,6 +4,10 @@ import time
 from django.utils import timezone
 from .models import RequestHistory
 from .variable_resolver import VariableResolver
+from apps.core.real_env_token import (
+    fetch_real_env_token_detail,
+    write_token_to_environment,
+)
 
 
 def ssl_verify_for(environment):
@@ -19,6 +23,43 @@ def ssl_verify_for(environment):
     if isinstance(value, dict):
         value = value.get('currentValue') or value.get('initialValue', True)
     return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def _is_token_expired(response):
+    """真实环境 accessToken 过期时业务接口返回 HTTP 401（body 含「无效的token」）。"""
+    return response.status_code == 401
+
+
+def _refresh_env_token(environment):
+    """重登真实环境换新 token 并写回环境变量。成功返回 True，失败（配置/网络/被拒）返回 False。"""
+    if not environment:
+        return False
+    try:
+        token, _ = fetch_real_env_token_detail()
+    except Exception:
+        return False
+    if not token:
+        return False
+    try:
+        write_token_to_environment(environment, token)
+    except Exception:
+        return False
+    return True
+
+
+def _apply_refreshed_token(headers, environment):
+    """刷新后把 environment 里的新 token 回填到 headers 的 Authorization。"""
+    token = None
+    if environment and environment.variables:
+        token = environment.variables.get('token')
+    if isinstance(token, dict):
+        token = token.get('currentValue') or token.get('initialValue')
+    if not token:
+        return
+    for key in list(headers.keys()):
+        if key.lower() == 'authorization':
+            headers[key] = 'Bearer ' + str(token)
+            return
 
 
 def _params_to_dict(params):
@@ -187,23 +228,33 @@ def execute_assertions(response, assertions):
     return results
 
 
-def execute_test_suite(test_suite, environment, executed_by):
-    """执行测试套件并返回结果"""
+def execute_test_suite(test_suite, environment, executed_by, execution=None):
+    """执行测试套件并返回结果。
+
+    可选参数 execution 传入预建的 TestExecution 记录（批量异步执行时预建 PENDING
+    记录，便于前端立即拿到 execution_id 并轮询）。为 None 时按旧行为自建记录。
+    """
     from .models import TestExecution, RequestHistory
     import requests
     import time
-    
+
     try:
         # 创建变量解析器
         resolver = VariableResolver()
-        
-        # 创建执行记录
-        execution = TestExecution.objects.create(
-            test_suite=test_suite,
-            status='RUNNING',
-            start_time=timezone.now(),
-            executed_by=executed_by
-        )
+
+        # 创建或复用执行记录
+        if execution is None:
+            execution = TestExecution.objects.create(
+                test_suite=test_suite,
+                status='RUNNING',
+                start_time=timezone.now(),
+                executed_by=executed_by
+            )
+        else:
+            execution.status = 'RUNNING'
+            execution.start_time = timezone.now()
+            execution.executed_by = executed_by
+            execution.save()
         
         # 获取套件中的请求
         suite_requests = test_suite.testsuiterequest_set.filter(enabled=True).order_by('order')
@@ -214,7 +265,11 @@ def execute_test_suite(test_suite, environment, executed_by):
         results = []
         passed_count = 0
         failed_count = 0
-        
+        verify_ssl = ssl_verify_for(environment)
+
+        # 套件级响应提取变量：后续请求可引用前序请求响应里的字段（如新增用户的 id）
+        extracted_vars = {}
+
         # 执行每个请求
         for suite_request in suite_requests:
             api_request = suite_request.request
@@ -224,6 +279,8 @@ def execute_test_suite(test_suite, environment, executed_by):
                 variables = {}
                 if environment:
                     variables.update(environment.variables)
+                # 合并前序请求提取的变量，实现套件内数据传递
+                variables.update(extracted_vars)
                 
                 # 替换URL中的变量（先解析动态函数，再替换环境变量）
                 url = _replace_variables(api_request.url, variables)
@@ -257,7 +314,8 @@ def execute_test_suite(test_suite, environment, executed_by):
                     api_request.body, api_request.method, variables, resolver,
                 )
                 
-                # 执行请求
+                # 执行请求（token 失效时自动刷新并重试一次）
+                token_refreshed = False
                 start_time = time.time()
                 response = requests.request(
                     method=api_request.method,
@@ -265,8 +323,21 @@ def execute_test_suite(test_suite, environment, executed_by):
                     headers=headers,
                     params=params,
                     timeout=30,
+                    verify=verify_ssl,
                     **request_body_kwargs(body_type, body_data),
                 )
+                if _is_token_expired(response) and _refresh_env_token(environment):
+                    token_refreshed = True
+                    _apply_refreshed_token(headers, environment)
+                    response = requests.request(
+                        method=api_request.method,
+                        url=url,
+                        headers=headers,
+                        params=params,
+                        timeout=30,
+                        verify=verify_ssl,
+                        **request_body_kwargs(body_type, body_data),
+                    )
                 end_time = time.time()
                 response_time = (end_time - start_time) * 1000
                 
@@ -277,6 +348,21 @@ def execute_test_suite(test_suite, environment, executed_by):
                         assertion['actual_time'] = response_time
                 
                 assertions_results = execute_assertions(response, assertions)
+
+                # 响应变量提取：把本请求响应里的字段写入套件级变量，供后续请求引用
+                for rule in (getattr(suite_request, 'extract_vars', None) or []):
+                    name = rule.get('name') if isinstance(rule, dict) else None
+                    json_path = rule.get('json_path') if isinstance(rule, dict) else None
+                    if not name or not json_path:
+                        continue
+                    try:
+                        from jsonpath_ng import parse
+                        _body = response.json()
+                        _matches = parse(json_path).find(_body)
+                        if _matches:
+                            extracted_vars[name] = _matches[0].value
+                    except Exception:
+                        pass
                 
                 # 检查所有断言是否通过
                 passed = True
@@ -312,7 +398,10 @@ def execute_test_suite(test_suite, environment, executed_by):
                     'response_time': response_time,
                     'passed': passed,
                     'error': error_message,
-                    'assertions_results': assertions_results
+                    'token_refreshed': token_refreshed,
+                    'assertions_results': assertions_results,
+                    'response_headers': dict(response.headers),
+                    'response_body': response.text
                 })
                 
                 # 保存请求历史
@@ -375,10 +464,13 @@ def execute_api_request(api_request, environment, executed_by):
     """执行单个API请求并返回结果"""
     import requests
     import time
-    
+
     try:
         # 创建变量解析器
         resolver = VariableResolver()
+
+        # 是否校验 HTTPS 证书（内网自签名证书需 false，与套件/视图执行路径保持一致）
+        verify_ssl = ssl_verify_for(environment)
         
         # 解析环境变量
         variables = {}
@@ -417,7 +509,8 @@ def execute_api_request(api_request, environment, executed_by):
             api_request.body, api_request.method, variables, resolver,
         )
         
-        # 执行请求
+        # 执行请求（token 失效时自动刷新并重试一次）
+        token_refreshed = False
         start_time = time.time()
         response = requests.request(
             method=api_request.method,
@@ -425,8 +518,21 @@ def execute_api_request(api_request, environment, executed_by):
             headers=headers,
             params=params,
             timeout=30,
+            verify=verify_ssl,
             **request_body_kwargs(body_type, body_data),
         )
+        if _is_token_expired(response) and _refresh_env_token(environment):
+            token_refreshed = True
+            _apply_refreshed_token(headers, environment)
+            response = requests.request(
+                method=api_request.method,
+                url=url,
+                headers=headers,
+                params=params,
+                timeout=30,
+                verify=verify_ssl,
+                **request_body_kwargs(body_type, body_data),
+            )
         end_time = time.time()
         response_time = (end_time - start_time) * 1000
         
@@ -465,6 +571,7 @@ def execute_api_request(api_request, environment, executed_by):
             'history_id': history.id,
             'status_code': response.status_code,
             'response_time': response_time,
+            'token_refreshed': token_refreshed,
             'assertions_results': assertions_results,
             'response_data': {
                 'headers': dict(response.headers),
@@ -495,12 +602,38 @@ def _replace_variables(text, variables):
     return result
 
 def _replace_variables_in_dict(data, variables):
-    """递归替换字典中的变量"""
+    """递归替换字典中的变量，并支持两个增强：
+
+    1. 整单元格引用：字符串值恰为 ``{{key}}``（前后无多余文本）且 variables[key]
+       是 dict/list 时，直接注入对象本身而非 str() 字符串化 —— 用于在 body 里
+       传递前序步骤提取的完整对象（如 getUserDTO 返回的完整用户 DTO）。
+    2. ``$extends`` 合并：字典含 ``$extends`` 键且其结果为 dict 时，把该 dict 作为
+       基准对象展开，其余键覆盖同名字段 —— 用于「发送完整 DTO 并只改一个字段」。
+    """
     if isinstance(data, dict):
-        return {k: _replace_variables_in_dict(v, variables) for k, v in data.items()}
+        base = None
+        result = {}
+        for k, v in data.items():
+            if k == '$extends':
+                resolved = _replace_variables_in_dict(v, variables)
+                if isinstance(resolved, dict):
+                    base = resolved
+            else:
+                result[k] = _replace_variables_in_dict(v, variables)
+        if base is not None:
+            merged = dict(base)
+            merged.update(result)
+            return merged
+        return result
     elif isinstance(data, list):
         return [_replace_variables_in_dict(item, variables) for item in data]
     elif isinstance(data, str):
+        stripped = data.strip()
+        if stripped.startswith('{{') and stripped.endswith('}}'):
+            key = stripped[2:-2].strip()
+            value = (variables or {}).get(key, data)
+            if isinstance(value, (dict, list)):
+                return value
         return _replace_variables(data, variables)
     else:
         return data

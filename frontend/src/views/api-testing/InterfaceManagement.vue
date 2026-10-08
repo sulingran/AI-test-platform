@@ -44,6 +44,8 @@
             :data="collections"
             :props="treeProps"
             node-key="id"
+            highlight-current
+            :current-node-key="currentNodeKey"
             :expand-on-click-node="false"
             :default-expanded-keys="expandedKeys"
             draggable
@@ -1007,7 +1009,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Folder, Document, MagicStick, Search, Close, CopyDocument, Delete, Upload } from '@element-plus/icons-vue'
 import api from '@/utils/api'
@@ -1031,6 +1034,14 @@ const flatCollections = ref([])
 const environments = ref([])
 const selectedEnvironment = ref(null)
 const selectedRequest = ref(null)
+// 树节点当前选中高亮（node-key 是 id），跟随 selectedRequest 变化，保证点击「发送」后高亮不丢
+const currentNodeKey = ref(null)
+watch(
+  () => selectedRequest.value?.id ?? null,
+  (id) => {
+    currentNodeKey.value = id ?? null
+  }
+)
 const response = ref(null)
 const sending = ref(false)
 const saving = ref(false)
@@ -1167,7 +1178,8 @@ const loadCollections = async (projectId) => {
   try {
     const response = await api.get('/api-testing/collections/', {
       params: {
-        project: projectId
+        project: projectId,
+        page_size: 1000
       }
     })
     // 后端可能返回分页格式 { results: [...] } 或直接返回数组
@@ -1309,80 +1321,84 @@ const flattenCollections = (items, parent = null) => {
 
 const onNodeClick = async (data) => {
   if (data.type === 'request') {
-    try {
-      const apiResponse = await api.get(`/api-testing/requests/${data.id}/`)
-      const requestData = apiResponse.data
+    await openRequestInEditor(data.id)
+  }
+}
 
-      // 初始化currentHeaders
-      currentHeaders.value = requestData.headers || {}
+const openRequestInEditor = async (requestId) => {
+  try {
+    const apiResponse = await api.get(`/api-testing/requests/${requestId}/`)
+    const requestData = apiResponse.data
 
-      // 将 params 从字典格式转换为数组格式
-      if (requestData.params && typeof requestData.params === 'object' && !Array.isArray(requestData.params)) {
-        const paramsArray = []
-        Object.keys(requestData.params).forEach(key => {
-          if (key && requestData.params[key] !== undefined) {
-            paramsArray.push({
-              enabled: true,
-              key,
-              value: requestData.params[key],
-              description: '',
-              type: 'text'
-            })
-          }
-        })
-        requestData.params = paramsArray
-      }
+    // 初始化currentHeaders
+    currentHeaders.value = requestData.headers || {}
 
-      // 将 headers 从字典格式转换为数组格式
-      if (requestData.headers && typeof requestData.headers === 'object' && !Array.isArray(requestData.headers)) {
-        const headersArray = []
-        Object.keys(requestData.headers).forEach(key => {
-          if (key && requestData.headers[key] !== undefined) {
-            headersArray.push({
-              enabled: true,
-              key,
-              value: requestData.headers[key],
-              description: '',
-              type: 'text'
-            })
-          }
-        })
-        requestData.headers = headersArray
-      }
-
-      // 解析body数据
-      if (requestData.body && requestData.body.type) {
-        if (requestData.body.type === 'json' && requestData.body.data) {
-          bodyType.value = 'raw'
-          rawType.value = 'json'
-          rawBody.value = JSON.stringify(requestData.body.data, null, 2)
-        } else if (requestData.body.type === 'raw' && requestData.body.data) {
-          bodyType.value = 'raw'
-          rawType.value = 'text'
-          rawBody.value = requestData.body.data
-        } else if (requestData.body.type === 'form-data') {
-          bodyType.value = 'form-data'
-          formData.value = requestData.body.data || []
-        } else if (requestData.body.type === 'x-www-form-urlencoded') {
-          bodyType.value = 'x-www-form-urlencoded'
-          formUrlEncoded.value = requestData.body.data || []
-        } else if (requestData.body.type === 'binary') {
-          bodyType.value = 'binary'
-        } else {
-          bodyType.value = 'none'
-          rawBody.value = ''
+    // 将 params 从字典格式转换为数组格式
+    if (requestData.params && typeof requestData.params === 'object' && !Array.isArray(requestData.params)) {
+      const paramsArray = []
+      Object.keys(requestData.params).forEach(key => {
+        if (key && requestData.params[key] !== undefined) {
+          paramsArray.push({
+            enabled: true,
+            key,
+            value: requestData.params[key],
+            description: '',
+            type: 'text'
+          })
         }
+      })
+      requestData.params = paramsArray
+    }
+
+    // 将 headers 从字典格式转换为数组格式
+    if (requestData.headers && typeof requestData.headers === 'object' && !Array.isArray(requestData.headers)) {
+      const headersArray = []
+      Object.keys(requestData.headers).forEach(key => {
+        if (key && requestData.headers[key] !== undefined) {
+          headersArray.push({
+            enabled: true,
+            key,
+            value: requestData.headers[key],
+            description: '',
+            type: 'text'
+          })
+        }
+      })
+      requestData.headers = headersArray
+    }
+
+    // 解析body数据
+    if (requestData.body && requestData.body.type) {
+      if (requestData.body.type === 'json' && requestData.body.data) {
+        bodyType.value = 'raw'
+        rawType.value = 'json'
+        rawBody.value = JSON.stringify(requestData.body.data, null, 2)
+      } else if (requestData.body.type === 'raw' && requestData.body.data) {
+        bodyType.value = 'raw'
+        rawType.value = 'text'
+        rawBody.value = requestData.body.data
+      } else if (requestData.body.type === 'form-data') {
+        bodyType.value = 'form-data'
+        formData.value = requestData.body.data || []
+      } else if (requestData.body.type === 'x-www-form-urlencoded') {
+        bodyType.value = 'x-www-form-urlencoded'
+        formUrlEncoded.value = requestData.body.data || []
+      } else if (requestData.body.type === 'binary') {
+        bodyType.value = 'binary'
       } else {
         bodyType.value = 'none'
         rawBody.value = ''
       }
-
-      response.value = null
-      selectedRequest.value = requestData
-    } catch (error) {
-      ElMessage.error('加载请求失败')
-      console.error('加载请求失败:', error)
+    } else {
+      bodyType.value = 'none'
+      rawBody.value = ''
     }
+
+    response.value = null
+    selectedRequest.value = requestData
+  } catch (error) {
+    ElMessage.error('加载请求失败')
+    console.error('加载请求失败:', error)
   }
 }
 
@@ -1882,7 +1898,8 @@ const fetchTokenAndWrite = async () => {
     const expiresAt = resp.data?.expires_at
     ElMessage.success(expiresAt ? `token 已写入「${target.name}」（过期时间 ${expiresAt}）` : `token 已写入「${target.name}」`)
   } catch (error) {
-    ElMessage.error('获取 token 失败')
+    const msg = error.response?.data?.error || '获取 token 失败'
+    ElMessage.error(msg)
     console.error('获取 token 失败:', error)
   } finally {
     tokenRefreshing.value = false
@@ -2803,9 +2820,50 @@ const loadVariableFunctions = async () => {
 }
 
 // 生命周期钩子
+const route = useRoute()
+
+// 从套件页深链进入时，定位项目并打开指定接口编辑器
+const handleDeepLinkRequest = async (requestId) => {
+  try {
+    const projectId = route.query.project_id ? Number(route.query.project_id) : null
+    if (projectId) {
+      selectedProject.value = projectId
+      await loadCollections(projectId)
+      await loadEnvironments(projectId)
+    } else {
+      // 未带 project_id 时，用请求所属集合反查项目
+      const { data: reqData } = await api.get(`/api-testing/requests/${requestId}/`)
+      const collectionId = reqData.collection
+      if (collectionId) {
+        const { data: collectionsData } = await api.get('/api-testing/collections/', { params: { page_size: 1000 } })
+        const allCollections = collectionsData.results || collectionsData || []
+        const target = allCollections.find(c =>
+          c.id === collectionId || (c.children && c.children.some(cc => cc.id === collectionId))
+        )
+        if (target) {
+          selectedProject.value = target.project
+          await loadCollections(target.project)
+          await loadEnvironments(target.project)
+        }
+      }
+    }
+
+    await openRequestInEditor(requestId)
+  } catch (error) {
+    ElMessage.error('打开接口失败')
+    console.error('深链打开接口失败:', error)
+  }
+}
+
 onMounted(async () => {
   await loadProjects()
   await loadVariableFunctions()
+
+  // 从套件页深链进入：编辑指定接口
+  const requestId = route.query.request_id
+  if (requestId) {
+    await handleDeepLinkRequest(String(requestId))
+  }
 
   // 添加全局点击事件监听器，用于隐藏右键菜单
   document.addEventListener('click', handleGlobalClick)

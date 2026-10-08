@@ -52,6 +52,9 @@ class AIExecutionReportGenerator:
             # 分析操作分布
             action_distribution = self._analyze_action_distribution(logs)
 
+        # 定位器记忆库统计（智能元素定位）
+        locator_memory = self._summarize_locator_memory()
+
         # 构建报告数据
         report = {
             'overview': self._generate_overview(task_statistics, step_info),
@@ -60,6 +63,7 @@ class AIExecutionReportGenerator:
             'steps': step_info,
             'metrics': performance_metrics,  # 添加性能指标
             'action_distribution': action_distribution,  # 添加操作分布
+            'locator_memory': locator_memory,  # 添加定位器记忆统计
             'execution_details': {
                 'case_name': self.record.case_name,
                 'execution_mode': self.record.get_execution_mode_display(),
@@ -73,6 +77,23 @@ class AIExecutionReportGenerator:
         }
 
         return report
+
+    def _summarize_locator_memory(self) -> Dict[str, Any]:
+        """统计定位器记忆库（智能元素定位）概况。"""
+        from django.db.models import Sum
+        from apps.ui_automation.models import LocatorMemory
+        try:
+            total = LocatorMemory.objects.count()
+            new_this_run = LocatorMemory.objects.filter(source_record_id=self.record.id).count()
+            total_hits = LocatorMemory.objects.aggregate(hits=Sum('hit_count')).get('hits') or 0
+        except Exception as e:
+            logger.warning(f"统计定位器记忆失败: {e}")
+            return {'total': 0, 'new_this_run': 0, 'total_hits': 0}
+        return {
+            'total': total,
+            'new_this_run': new_this_run,
+            'total_hits': total_hits,
+        }
 
     def _calculate_task_statistics(self, planned_tasks: List[Dict]) -> Dict[str, Any]:
         """

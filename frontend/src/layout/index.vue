@@ -178,6 +178,10 @@
               <el-icon><Timer /></el-icon>
               <span>{{ $t('menu.aiExecutionRecords') }}</span>
             </el-menu-item>
+            <el-menu-item index="/ai-intelligent-mode/locator-memory">
+              <el-icon><CollectionTag /></el-icon>
+              <span>{{ $t('menu.locatorMemory') }}</span>
+            </el-menu-item>
 
           </template>
 
@@ -294,7 +298,7 @@ import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
   DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Tickets, Plus, Back
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Tickets, Plus, Back, CollectionTag
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
 
@@ -387,6 +391,7 @@ const breadcrumbTitle = computed(() => {
     '/ai-intelligent-mode/testing': t('menu.aiIntelligentTesting'),
     '/ai-intelligent-mode/cases': t('menu.aiCaseManagement'),
     '/ai-intelligent-mode/execution-records': t('menu.aiExecutionRecords'),
+    '/ai-intelligent-mode/locator-memory': t('menu.locatorMemory'),
 
 
     // 配置中心

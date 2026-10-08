@@ -277,7 +277,7 @@ class TestSuiteRequestSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TestSuiteRequest
-        fields = ['id', 'request', 'order', 'assertions', 'enabled']
+        fields = ['id', 'request', 'order', 'assertions', 'enabled', 'extract_vars']
 
 
 class TestSuiteSerializer(serializers.ModelSerializer):

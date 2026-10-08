@@ -111,6 +111,31 @@ export default {
     confirmDelete: '确认删除'
   },
 
+  // 定位器记忆库
+  locatorMemory: {
+    serialNumber: '序号',
+    pageUrl: '页面URL',
+    semanticText: '语义文本',
+    nodeName: '标签名',
+    locatorStrategy: '定位策略',
+    locatorValue: '定位值',
+    hitCount: '命中次数',
+    isValid: '是否有效',
+    valid: '有效',
+    invalid: '无效',
+    lastHitAt: '最后命中时间',
+    updatedAt: '更新时间',
+    viewDetail: '详情',
+    detailTitle: '定位器记忆详情',
+    projectName: '所属项目',
+    sourceRecord: '来源记录',
+    confidence: '置信度',
+    semanticKey: '语义键',
+    attributes: '属性(attributes)',
+    embedding: '向量(embedding)',
+    searchPlaceholder: '搜索语义文本/定位值/URL/标签名'
+  },
+
   // 状态
   status: {
     notStarted: '未开始',

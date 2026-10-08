@@ -1,6 +1,7 @@
 FROM python:3.12-slim-bookworm
 
-ARG APT_MIRROR=deb.debian.org
+ARG APT_MIRROR=mirrors.aliyun.com
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
     && apt-get update \
@@ -17,7 +18,7 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list /etc/apt/sou
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 
 # Browser automation and report generation are part of the existing backend dependency set.
 RUN playwright install --with-deps chromium
